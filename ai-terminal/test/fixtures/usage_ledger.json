@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "machine": "Alpha",
+  "generatedAt": "2026-11-25T10:00:00.000Z",
+  "days": 7,
+  "basis": {
+    "unit": "millions of weighted cost units (an estimate; the weekly limit's real weighting is not published)",
+    "weights": {
+      "input": 1,
+      "cacheWrite5m": 1.25,
+      "cacheWrite1h": 2,
+      "cacheRead": 0.1,
+      "output": 5
+    },
+    "windowMin": 30,
+    "topPerWindow": 3,
+    "sessionsAreLowerBound": true
+  },
+  "coverage": {
+    "windows": 10,
+    "from": "2026-11-24T06:00:00.000Z",
+    "to": "2026-11-25T07:06:00.000Z",
+    "unknownLines": 0
+  },
+  "weeks": [
+    {
+      "weekOf": "2026-11-23",
+      "days": 5,
+      "inProgressDays": 1,
+      "unitsM": 191.8,
+      "perDayM": 38.4,
+      "subagentM": 37.5,
+      "opusM": 120,
+      "partial": true,
+      "wake": {
+        "n": 12,
+        "unitsM": 5.2
+      },
+      "tokM": {
+        "in": 0,
+        "out": 1.6,
+        "cr": 309.2,
+        "cw": 13.2,
+        "cw1h": 3.6
+      },
+      "model": {
+        "opus-5-5": {
+          "calls": 1712,
+          "unitsM": 120
+        }
+      },
+      "checkIns": {
+        "skipped": 1,
+        "told": 1,
+        "woken": 2,
+        "handed-off": 0
+      },
+      "machines": [
+        {
+          "machine": "Alpha",
+          "unitsM": 141.8
+        },
+        {
+          "machine": "Beta",
+          "unitsM": 50
+        }
+      ]
+    },
+    {
+      "weekOf": "2026-11-16",
+      "days": 2,
+      "inProgressDays": 0,
+      "unitsM": 190,
+      "perDayM": 95,
+      "subagentM": 47.5,
+      "opusM": 152,
+      "partial": false,
+      "wake": {
+        "n": 6,
+        "unitsM": 2.6
+      },
+      "tokM": {
+        "in": 0,
+        "out": 0.8,
+        "cr": 154.6,
+        "cw": 6.6,
+        "cw1h": 1.8
+      },
+      "model": {
+        "opus-5-5": {
+          "calls": 856,
+          "unitsM": 152
+        }
+      },
+      "checkIns": {
+        "skipped": 0,
+        "told": 0,
+        "woken": 0,
+        "handed-off": 0
+      },
+      "machines": [
+        {
+          "machine": "Alpha",
+          "unitsM": 190
+        }
+      ]
+    }
+  ],
+  "sessions": [
+    {
+      "id": "1a2b3c4d",
+      "idKind": "agent",
+      "unitsM": 23,
+      "windows": 8,
+      "firstAt": "2026-11-24T06:00:00.000Z",
+      "lastAt": "2026-11-25T07:06:00.000Z",
+      "longestRunWindows": 7,
+      "dominatedWindows": 7,
+      "why": [
+        {
+          "code": "context-reread",
+          "n": 7,
+          "text": "Re-reads a huge context every turn: cache reads were the main cost in 7 windows it dominated."
+        },
+        {
+          "code": "model",
+          "n": 7,
+          "text": "The heaviest model in its dominated windows: opus-5."
+        },
+        {
+          "code": "long-run",
+          "n": 7,
+          "text": "Stayed in the top 3 for 3.5 hours without a break: a long run or a polling loop."
+        },
+        {
+          "code": "check-in-wakes",
+          "n": 2,
+          "text": "Woken by 2 check-ins at about 610k tokens of context, idle up to 130 min: each wake of an idle session re-reads its context cold."
+        }
+      ],
+      "machine": "Alpha",
+      "sessionId": "abcd1234-0000-4000-8000-000000000001",
+      "name": "build the panel",
+      "checkIns": {
+        "skipped": 1,
+        "told": 0,
+        "woken": 2,
+        "handedOff": 0,
+        "maxCtxK": 610,
+        "maxIdleMin": 130
+      }
+    },
+    {
+      "id": "b1b2b3b4",
+      "idKind": "agent",
+      "unitsM": 6,
+      "windows": 1,
+      "firstAt": "2026-11-24T08:00:00.000Z",
+      "lastAt": "2026-11-24T08:00:00.000Z",
+      "longestRunWindows": 1,
+      "dominatedWindows": 1,
+      "why": [
+        {
+          "code": "cold-cache-write",
+          "n": 1,
+          "text": "Cold cache writes (a cold start, or a wake after an idle hour): cache writes were the main cost in 1 window it dominated."
+        },
+        {
+          "code": "model",
+          "n": 1,
+          "text": "The heaviest model in its dominated windows: sonnet-5-5."
+        }
+      ],
+      "machine": "Beta",
+      "sessionId": null,
+      "name": null
+    },
+    {
+      "id": "5e6f7a8b",
+      "idKind": "agent",
+      "unitsM": 4.2,
+      "windows": 7,
+      "firstAt": "2026-11-24T06:00:00.000Z",
+      "lastAt": "2026-11-24T09:00:00.000Z",
+      "longestRunWindows": 7,
+      "dominatedWindows": 0,
+      "why": [
+        {
+          "code": "long-run",
+          "n": 7,
+          "text": "Stayed in the top 3 for 3.5 hours without a break: a long run or a polling loop."
+        }
+      ],
+      "machine": "Alpha",
+      "sessionId": null,
+      "name": null
+    },
+    {
+      "id": "9c0d1e2f",
+      "idKind": "agent",
+      "unitsM": 1.5,
+      "windows": 1,
+      "firstAt": "2026-11-24T14:00:00.000Z",
+      "lastAt": "2026-11-24T14:00:00.000Z",
+      "longestRunWindows": 1,
+      "dominatedWindows": 1,
+      "why": [
+        {
+          "code": "cold-cache-write",
+          "n": 1,
+          "text": "Cold cache writes (a cold start, or a wake after an idle hour): cache writes were the main cost in 1 window it dominated."
+        },
+        {
+          "code": "model",
+          "n": 1,
+          "text": "The heaviest model in its dominated windows: sonnet-5-5."
+        }
+      ],
+      "machine": "Alpha",
+      "sessionId": null,
+      "name": null
+    }
+  ],
+  "checkIns": {
+    "total": {
+      "skipped": 1,
+      "told": 1,
+      "woken": 2,
+      "handed-off": 0
+    },
+    "sessions": [
+      {
+        "id": "abcd1234",
+        "idKind": "wt",
+        "skipped": 1,
+        "told": 0,
+        "woken": 2,
+        "handedOff": 0,
+        "maxCtxK": 610,
+        "maxIdleMin": 130,
+        "lastAt": "2026-11-24T12:00:00.000Z",
+        "machine": "Alpha",
+        "sessionId": "abcd1234-0000-4000-8000-000000000001",
+        "name": "build the panel"
+      },
+      {
+        "id": "deadbeef",
+        "idKind": "wt",
+        "skipped": 0,
+        "told": 1,
+        "woken": 0,
+        "handedOff": 0,
+        "maxCtxK": 540,
+        "maxIdleMin": null,
+        "lastAt": "2026-11-24T13:00:00.000Z",
+        "machine": "Alpha",
+        "sessionId": null,
+        "name": null
+      }
+    ]
+  },
+  "machines": [
+    "Alpha",
+    "Beta"
+  ],
+  "unreachable": [
+    "Gamma"
+  ],
+  "skipped": [
+    {
+      "machine": "Delta",
+      "reason": "older version: no usage ledger yet"
+    }
+  ]
+}

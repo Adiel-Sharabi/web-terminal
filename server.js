@@ -51,6 +51,7 @@ const { isDirectLocalRequest } = require('./lib/local-request');
 const deviceOps = require('./lib/device-ops');
 const answerPace = require('./lib/answer-pace');
 const usageLog = require('./lib/usage-log'); // #425 - skip reasons, session cost, viewer time
+const usageLedger = require('./lib/usage-ledger'); // #529 - the usage ledger's report (usage-monitor.js's files)
 const reconnectBuffer = require('./lib/reconnect-buffer');
 // #146 — the pure smallest-active-viewer-wins rule for one PTY with many viewers.
 const terminalSize = require('./lib/terminal-size');
@@ -6757,7 +6758,10 @@ function serverCapabilities() {
     'mc-start',
     // #523 - GET /api/mc/lines, POST /api/mc/lines/move, `line` on subjects, `?line=`, `lines`
     // on /api/mc/now, a report's optional `line` and Start work's `line`/`lineName`.
-    'mc-lines'];
+    'mc-lines',
+    // #529 - GET /api/usage-ledger (?cluster=1 merges the peers): the weekly usage totals, the session
+    // rank and why each is big. An older server would 404 it; a cluster merge skips such a peer.
+    'usage-ledger'];
   // #412/#428 - GET /api/leases (forwarded to the lease authority). The companion's Leases
   // section asks only a server that advertises it: an older one would 404, which must
   // never read as "nobody holds anything". Like 'fcm', only where it is configured: a
@@ -6918,6 +6922,66 @@ app.get('/api/machine', async (req, res) => {
   } catch (e) {
     console.error('machine profile failed:', e.message);
     res.status(500).json({ error: 'Failed to read the machine profile' });
+  }
+});
+
+// --- API: #529 the usage ledger (lib/usage-ledger.js) ---
+// What claude-memory's usage-monitor.js wrote under ~/.claude, as one report: weekly totals, the
+// sessions that burned the most (and why), the check-in decisions (#540). Read-only. The files are
+// followed incrementally and the report is memoised on what they hold (lib/usage-ledger.js), so a
+// request costs two stats when nothing was appended. `?cluster=1` adds the peers' own reports (each
+// asked WITHOUT cluster, so no loop); a peer too old to know the route is named in `skipped`, one
+// that cannot be asked in `unreachable`. Under WT_TEST nothing is read unless a spec names the files.
+let _usageStore = null;
+function usageStore() {
+  if (!_usageStore) {
+    const f = usageLedger.filesFor({ home: transcriptHome(), env: process.env });
+    _usageStore = usageLedger.createStore({ ledgerFile: f.ledger, rollupFile: f.rollup });
+  }
+  return _usageStore;
+}
+let _usageMemo = { key: null, report: null };
+async function localUsageReport(p) {
+  const store = usageStore();
+  await store.refresh();
+  const snap = store.snapshot();
+  const now = Date.now();
+  const key = [snap.version, p.days, p.weeks, p.top, Math.floor(now / 60000)].join('|');
+  if (_usageMemo.key !== key) _usageMemo = { key, report: usageLedger.buildReport(snap, { machine: getServerName(), now, days: p.days, weeks: p.weeks, top: p.top }) };
+  // The links to live sessions are never memoised: sessions come and go between two reads.
+  let live = [];
+  try { live = ((await workerClient.rpc('listSessions', {}, MACHINE_QUERY_WAIT_MS)).sessions || []).map((x) => ({ id: x.id, claudeSessionId: x.claudeSessionId || null, name: x.name || null })); } catch { /* no links, the report stands */ }
+  return usageLedger.attachLive(_usageMemo.report, live);
+}
+async function clusterUsageReport(local, p) {
+  const tokens = loadClusterTokens();
+  const publicUrl = liveConfig('publicUrl', null);
+  const peers = (getClusterConfig() || []).filter((s) => s && s.url && (!publicUrl || s.url !== publicUrl));
+  const unreachable = [];
+  const skipped = [];
+  const got = await Promise.all(peers.map(async (s) => {
+    const name = s.name || s.url;
+    const t = tokens[s.url];
+    if (!t || !t.token) { unreachable.push(name); return null; }
+    try {
+      const r = await clusterFetch(`${s.url}/api/usage-ledger?days=${p.days}&weeks=${p.weeks}&top=${p.top}`, { headers: { Authorization: `Bearer ${t.token}` }, timeout: 4000 });
+      if (r.status === 404) { skipped.push({ machine: name, reason: 'older version: no usage ledger yet' }); return null; }
+      const report = r.ok ? JSON.parse(r.body) : null;
+      if (!usageLedger.isReport(report)) { unreachable.push(name); return null; }
+      return { name: report.machine || name, report };
+    } catch { unreachable.push(name); return null; }
+  }));
+  return { ...usageLedger.mergeReports(local, got.filter(Boolean), { top: p.top, weeks: p.weeks }), unreachable, skipped };
+}
+app.get('/api/usage-ledger', async (req, res) => {
+  const p = usageLedger.parseParams(req.query);
+  if (p.error) return res.status(400).json({ error: p.error });
+  try {
+    const local = await localUsageReport(p);
+    res.json(p.cluster ? await clusterUsageReport(local, p) : local);
+  } catch (e) {
+    console.error(`[usage-ledger] ${e.message}`);
+    res.status(500).json({ error: 'could not read the usage ledger' });
   }
 });
 

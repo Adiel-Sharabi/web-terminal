@@ -402,11 +402,11 @@ void main() {
       return toSessions;
     }
 
-    testWidgets('desktop: a side nav of Now, Lines, Sessions, Machines', (tester) async {
+    testWidgets('desktop: a side nav of Now, Lines, Sessions, Machines, Usage', (tester) async {
       await pump(tester, const Size(1400, 900));
       expect(find.byKey(const ValueKey('mc-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsNothing);
-      for (final l in ['Now', 'Lines', 'Sessions', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Sessions', 'Machines', 'Usage']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text(l)), findsOneWidget);
       }
       expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text('Ask')), findsNothing);
@@ -432,11 +432,11 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('phone: a bottom bar of Now, Lines, Ask, Machines; Ask is the Ask view (#511)', (tester) async {
+    testWidgets('phone: a bottom bar of Now, Lines, Ask, Machines, Usage; Ask is the Ask view (#511)', (tester) async {
       await pump(tester, const Size(400, 860));
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-rail')), findsNothing);
-      for (final l in ['Now', 'Lines', 'Ask', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Ask', 'Machines', 'Usage']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-bottom-bar')), matching: find.text(l)), findsOneWidget);
       }
       await tester.tap(find.text('Ask'));

@@ -614,3 +614,44 @@ Report: optional top-level `line` (one line, at most 80; anything else refuses t
 reason; a `line` with only a `wait` is refused too, never dropped). A wait-only report keeps it; a full report without it clears it. `brief.line` carries it
 (null when none) and a closed record keeps it. The per-prompt note does not teach it (its length
 budget); the refusal does.
+
+## Usage ledger (#529) - `lib/usage-ledger.js`
+Where the weekly limit went. Any server answers for itself; **not** an authority-only `/api/mc/*` route.
+`GET /api/usage-ledger?days=7&weeks=6&top=10[&cluster=1]` (Bearer or cookie, read-only; `days` 1-35,
+`weeks` 1-12, `top` 1-50, anything else is `400 {error}` naming the parameter). Capability `usage-ledger`.
+The data is claude-memory's `usage-monitor.js` (the ONE owner of the transcript parser and the formats):
+`~/.claude/usage-ledger.jsonl` (a 30-minute window line `{at, machine, windowMin, windowM, dayM, out, cr, cw,
+model:{name,pct}, kind:{name,pct}, top:[{id,M}]}`, and the check-in decisions of #540 `{at, machine,
+event:'check-in', decision, by, id, why, n, idleMin, ctxK}`) and `~/.claude/usage-rollup.jsonl` (one line per
+finished local day). This module only READS them and invents no field; `weekStart`, `localDay`, the weights and
+the top 3 per window mirror usage-monitor.js (change it there first). Units are millions of weighted cost units,
+an ESTIMATE.
+```
+Report = { version: 1, machine, generatedAt, days,
+  basis: { unit, weights, windowMin: 30, topPerWindow: 3, sessionsAreLowerBound: true },
+  coverage: { windows, from, to, unknownLines },
+  weeks: [{ weekOf, days, inProgressDays, partial, unitsM, perDayM, subagentM, opusM, wake:{n, unitsM},
+            tokM, model:{name:{calls,unitsM}}, checkIns:{skipped, told, woken, 'handed-off'} }],   // newest first
+  sessions: [{ id, idKind: 'agent', machine, unitsM, windows, firstAt, lastAt, longestRunWindows, dominatedWindows,
+               why: [{code, n, text}], sessionId, name, checkIns? }],                              // ranked
+  checkIns: { total:{...}, sessions: [{ id, idKind: 'wt', machine, woken, skipped, told, handedOff, maxCtxK, maxIdleMin,
+              lastAt, sessionId, name }] },
+  machines?, unreachable?, skipped? }                                                              // cluster=1 only
+```
+- **Weeks:** finished days come from the roll-up (it survives Claude's 30-day transcript clean-up); a day it does
+  not hold yet (today) is read from its last window's running `dayM` and counted ONCE, flagged `inProgressDays`.
+- **Sessions are a lower bound:** a window names only its top 3, so a session's units are what the windows credit it.
+  `why` codes: `context-reread`, `cold-cache-write`, `output-heavy`, `main-cost` (the window's own main cost kind,
+  only from windows the session DOMINATED, at least half the window's units), `model` (the heaviest model in those),
+  `long-run` (6+ successive windows in the top 3: a long run or a polling loop), `check-in-wakes` (from the #540
+  lines), `unexplained` (it ranked but dominated nothing: the ledger keeps no per-session split). Per-session
+  subagent counts are not in the ledger; the week carries `subagentM` instead.
+- **Links:** `sessionId`/`name` are set only while exactly ONE live session on that machine matches the id prefix
+  (a window's id is the agent conversation's, a check-in line's the session's own); an ambiguous or ended one is null.
+- **Cluster:** `?cluster=1` adds each peer's own report (asked without `cluster`, so no loop): weeks and check-in
+  tallies add up, sessions rank together and keep their `machine`. A peer too old for the route answers 404 and is
+  named in `skipped` ([{machine, reason}]), one that cannot be asked in `unreachable` - neither is an error.
+- **Cost:** a file is followed incrementally (one stat per request, then only the appended bytes; a first look reads
+  at most the last 8 MB; a truncated or replaced file is read again), and the report is memoised on what the files hold.
+  Under WT_TEST nothing is read unless a spec names `WT_USAGE_LEDGER_FILE` / `WT_USAGE_ROLLUP_FILE`.
+The companion's **Usage** tab (Mission Control) asks the first server that advertises the capability with `cluster=1`.
