@@ -325,6 +325,7 @@ takes no action on any session yet.
   card; a pick is sent to the session as the reply `Decision: <label>`.
 - `POST /api/sessions` takes an optional `goal` (one line, up to 300 characters). A hand-off
   successor inherits it.
+- `POST /api/sessions` also takes an optional `model` (#533), a model name such as `sonnet`, `opus` or `claude-sonnet-5-5`: the server puts `--model <name>` inside the command's claude call, right after the `claude` program word (so `claude "go"; exit` still runs on that model), unless that call already names one (its own choice wins), and answers the model of the command it stored as `model`. A name with brackets such as `opus[1m]` is stored quoted. It is a 400, with a reason and nothing created, when the name is malformed, when the command has no claude call (`model` is only for claude sessions) or cannot be read as a plain shell line, or when the flag would push the command past its 500 characters (never cut to fit). The same rule and the same name check (`lib/model-flag.js`) serve the supervisor dispatcher's model (#525). A routine task (fix with a repro, review round, watch/deploy/merge run) names `sonnet`; design, ambiguous or security work and the one final gate stay on the default.
 - Every server appends its sessions' lifecycle (opened, hand-off, closed and why: closed, reaped,
   handed-off, exited, lost) to `logs/sessions-journal.jsonl` and serves it at `GET /api/journal?since=`.
 - `POST /api/sessions/:id/prompt {text}` types one `[web-terminal supervisor]` prompt, only when the
