@@ -175,6 +175,22 @@ test.describe('#504 what a subject waits on, and the one bucket rule', () => {
     expect(v.subjects.find((s) => s.key === 'ado:1').needsYou.decision).toBe(null);
   });
 
+  test('#533 the model its launch command names rides on the session and on the card; a peer too old to send one reads null', () => {
+    const k = 'ado:42';
+    const ask = { ...row('beta', { name: 'asker', items: [{ ref: k }], reason: { kind: 'you', text: 'pick' }, wait: { on: 'you', what: 'pick', at: NOW - 3 * MIN } }), model: 'sonnet' };
+    const old = row('alpha', { items: [{ ref: k }] }); // no `model` on the row at all
+    const gone = closedRec('alpha', { items: [{ ref: k }] });
+    const s = view({ rows: [ask, old], closed: [gone] }).subjects[0];
+    expect(s.sessions.find((x) => x.id === ask.id).model).toBe('sonnet');
+    expect(s.sessions.find((x) => x.id === old.id).model).toBeNull();
+    expect(s.sessions.find((x) => x.id === gone.rec.id).model).toBeNull(); // a closed record keeps none
+    expect(s.needsYou).toMatchObject({ sessionId: ask.id, model: 'sonnet' });
+    // The other two card builders (#526 asks) carry it as well: all three read the node's one field.
+    const node = M.sessionNodes({ rows: [{ ...row('alpha', { items: [{ ref: 'ado:7' }] }), model: 'haiku' }], closed: [], now: NOW })[0];
+    expect(M.askCard(node, { question: 'Which schema?', options: [{ label: 'a' }, { label: 'b' }], at: NOW - MIN }, 'ado:7', 'ado:7', 't').model).toBe('haiku');
+    expect(M.possibleAskCard(node, { text: 'Shall I go on?', at: NOW - MIN }, 'ado:7', 'ado:7', 't').model).toBe('haiku');
+  });
+
   test('a peer too old to send a reason is read from its status and reported wait', () => {
     const old = { ...row('beta', { status: 'waiting', items: [{ ref: 'ado:1' }] }) };
     delete old.reason;

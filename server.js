@@ -86,6 +86,7 @@ const { createPromptEpisodes } = require('./lib/mc-episodes'); // #506 - a promp
 const mcAnalyst = require('./lib/mc-analyst'); // #511 - Ask, a read-only Analyst
 const mcBinding = require('./lib/mc-binding'); // #512 - a session bound to a project and subjects at birth
 const mcStart = require('./lib/mc-start'); // #512 - Start work: the request, the name and brief, the machine
+const modelChoice = require('./lib/model-choice'); // #533 - Start work's kinds of work and the model each suggests
 const mcLines = require('./lib/mc-lines'); // #523 - lines of work: which line a work item is on
 const mcQuestions = require('./lib/mc-questions'); // #510 - questions with context on demand
 const recap = require('./lib/recap');
@@ -5945,6 +5946,8 @@ async function _computeClusterSessions(reqUser) {
         id: s.id, name: s.name, cwd: s.cwd, status: s.status,
         clients: s.clients || 0, pid: s.pid,
         lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+        // #533 - the model its launch command names (lib/model-flag.js modelOf), null = the default model.
+        model: modelFlag.modelOf(s.autoCommand || ''),
         // Which AI agent this session runs (null = plain shell) — the sidebar tints
         // each row by it. Remote peers already carry it in their own /api/sessions.
         agent: s.agent ?? null,
@@ -7568,6 +7571,15 @@ app.get('/api/mc/machines', async (req, res) => {
   }
 });
 
+// #533 - GET /api/mc/models: the kinds of work, the model each suggests and the models Start work offers
+// (lib/model-choice.js). A server without this route does not take `kind` / `model` at all: the
+// companion draws no picker for it, so a choice is never sent to be dropped silently.
+app.get('/api/mc/models', (req, res) => {
+  const refused = mcRefusal(supervisorAuthority());
+  if (refused) return res.status(refused.status).json(refused.json);
+  res.json({ ...modelChoice.catalogue(), generatedAt: Date.now() });
+});
+
 app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
   const refused = mcRefusal(supervisorAuthority());
   if (refused) return res.status(refused.status).json(refused.json);
@@ -7640,7 +7652,9 @@ app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {
     res.json({
       server: peer ? peer.name : me, serverUrl: peer ? peer.url : null, sessionId: created.id,
       name: created.name || plan.name, agent: created.agent ?? null, agentReady: created.agentReady ?? true,
-      project: v.project.id, subjects: v.subjects.map((s) => s.key), hunt: v.hunt, line: v.line, generatedAt: Date.now(),
+      project: v.project.id, subjects: v.subjects.map((s) => s.key), hunt: v.hunt, line: v.line,
+      // #533 - what the command that was typed names (null = the default model), and the kind of work chosen.
+      model: plan.model, kind: v.choice ? v.choice.kind : null, generatedAt: Date.now(),
     });
   } catch (e) {
     console.error(`[mc] start: ${e.message}`);
@@ -7883,6 +7897,8 @@ async function sessionsListRows() {
     id: s.id, name: s.name, cwd: s.cwd,
     clients: s.clients || 0, pid: s.pid, status: s.status,
     lastActivity: s.lastActivity, autoCommand: s.autoCommand || '',
+    // #533 - the model its launch command names (lib/model-flag.js modelOf), null = the default model.
+    model: modelFlag.modelOf(s.autoCommand || ''),
     // Which AI agent this session runs (null = plain shell). Drives the sidebar
     // tint and the chat lens; see GET /api/agents for the catalogue.
     agent: s.agent ?? null,
