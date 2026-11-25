@@ -41,6 +41,18 @@ String? mcDecisionQuestionToShow(McCard c) {
   return what != null && mcSameQuestion(what, d.question) ? null : d.question;
 }
 
+/// #548 - the first line of a decision's context, for the card's face: what the question is about
+/// and why it matters, where the person does not have to open the card to see it. The whole text
+/// is in the opened card ([McCardDetail]). Null when the context says nothing.
+String? mcContextLine(String? context) {
+  if (context == null) return null;
+  for (final line in context.split(String.fromCharCode(10))) {
+    final t = line.trim();
+    if (t.isNotEmpty) return t;
+  }
+  return null;
+}
+
 /// The options on the card's face. With [onPick] a chip answers (an [ActionChip]); [enabled] off
 /// while a pick is on its way. Without it they are plain chips, as before the card could answer.
 class McCardOptionChips extends StatelessWidget {

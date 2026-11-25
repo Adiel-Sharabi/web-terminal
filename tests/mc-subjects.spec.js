@@ -326,3 +326,34 @@ test.describe('#505 the Mission Control state file', () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 });
+
+test.describe('#548 a `#0` item is never a subject (a peer\'s row is data)', () => {
+  test('an item whose number is 0 makes no subject, on any server, whatever its key says', () => {
+    const real = row('alpha', { name: 'orchestrator', items: [{ ref: 'ado:9001', title: 'Real item' },
+      { ref: 'Owner/Repo#0', key: 'owner/repo#0', title: 'Placeholder' }, { ref: '#0', key: '#0' }] });
+    const v = view({ rows: [real] });
+    expect(v.subjects.map((s) => s.key)).toEqual(['ado:9001']);
+    const nodes = M.sessionNodes({ rows: [real], closed: [], now: NOW });
+    expect(M.subjectKeyOf(nodes[0].items[1], nodes[0])).toBeNull();
+    expect(M.subjectKeyOf(nodes[0].items[2], nodes[0])).toBeNull();
+    expect(M.subjectKeyOf(nodes[0].items[0], nodes[0])).toBe('ado:9001');
+    expect(M.trackerKeys(nodes)).toEqual(['ado:9001']);
+  });
+
+  test('itemOf: the item a ref names (any spelling), else the only real item; several or none is null', () => {
+    const mk = (items) => M.sessionNodes({ rows: [row('alpha', { name: 'one', items })], closed: [], now: NOW })[0];
+    const real = { ref: 'ado:9001', title: 'Real item' };
+    const zero = { ref: 'Owner/Repo#0', key: 'owner/repo#0', title: 'Placeholder' };
+    expect(M.itemOf(mk([real, zero]), null).ref).toBe('ado:9001');
+    expect(M.itemOf(mk([real, { ref: 'ado:3', title: 'Second' }]), null)).toBeNull();
+    expect(M.itemOf(mk([zero]), null)).toBeNull();
+    expect(M.itemOf(mk([]), null)).toBeNull();
+    expect(M.itemOf(mk([real, { ref: 'ado:3', title: 'Second' }]), 'ado:3').ref).toBe('ado:3');
+    expect(M.itemOf(mk([real]), 'ado:99')).toBeNull();
+    const n = mk([real, { ref: '#7', title: 'Seven' }]);
+    n.wait = { on: 'you', what: 'x', at: NOW, ref: 'gh#7' };
+    expect(M.waitItemKey(n)).toBe(M.subjectKeyOf(n.items[1], n));
+    n.wait = { on: 'you', what: 'x', at: NOW };
+    expect(M.waitItemKey(n)).toBeNull();
+  });
+});

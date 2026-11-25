@@ -794,7 +794,13 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   `ref` it takes a session's one bound item before it reports, the one item reported blocked (a wait)
   or the item whose title and note share at least two significant words (filler like "this" or
   "should" never counts) with the question; otherwise it shows the question alone, never the title of the
-  session's first item. Two cards of one session can therefore carry different titles.
+  session's first item - except that a session holding exactly ONE work item (a `#0` placeholder is none)
+  is what its cards are about (#548). Two cards of one session can therefore carry different titles.
+  A decision card shows the first line of its context under the question (the whole text when opened).
+  **A wait you answered elsewhere (#547):** when you type into the session's child (or another
+  session on the same item) after it reported a wait, the parent's card says "may be answered in
+  <session>" and offers **Tell it** (`POST /api/mc/tell`), which sends the parent one line through
+  the gated prompt: what you typed there and that session's last reply.
   **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,
