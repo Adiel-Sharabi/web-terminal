@@ -96,6 +96,8 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
           feed: widget.feed,
           lineId: lineId,
           now: widget.now,
+          onAnswer: widget.onAnswer,
+          onOpenSession: widget.onOpenSession,
           onOpenSubject: (s) => Navigator.of(context).push(_subjectRoute(context, s)),
         ),
       );
@@ -106,6 +108,8 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
           feed: widget.feed,
           projectId: projectId,
           now: widget.now,
+          onAnswer: widget.onAnswer,
+          onOpenSession: widget.onOpenSession,
           onStartWork: widget.onStartWork == null ? null : () => widget.onStartWork!(projectId),
           onOpenSubject: (s) => Navigator.of(context).push(_subjectRoute(context, s)),
         ),
@@ -170,6 +174,8 @@ class McProjectScreen extends StatefulWidget {
     required this.feed,
     required this.projectId,
     required this.onOpenSubject,
+    this.onAnswer,
+    this.onOpenSession,
     this.onStartWork,
     this.now,
   });
@@ -178,6 +184,10 @@ class McProjectScreen extends StatefulWidget {
   final String projectId;
 
   final void Function(McSubject subject) onOpenSubject;
+
+  /// #546 - answer / open for the waits shown once above the items; null: none is shown.
+  final void Function(McCard card)? onAnswer;
+  final void Function(String sessionId)? onOpenSession;
 
   /// #512 - Start work in this project; null: no button.
   final VoidCallback? onStartWork;
@@ -347,6 +357,10 @@ class _McProjectScreenState extends State<McProjectScreen> {
                 ]),
               ),
             const SizedBox(height: 8),
+            // #546: a wait that names no item, once - not on each item it covers.
+            if (data != null && widget.onAnswer != null && widget.onOpenSession != null)
+              ...mcWaitBanners(context, widget.feed, data,
+                  onAnswer: widget.onAnswer!, onOpenSession: widget.onOpenSession!, now: widget.now),
             // Filters, each with the server's count.
             Wrap(spacing: 6, runSpacing: 4, children: [
               for (final f in McSubjectFilter.values)
@@ -400,7 +414,11 @@ class _McProjectScreenState extends State<McProjectScreen> {
         Padding(
           key: const ValueKey('mc-project-empty'),
           padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Text('Nothing under "${_filter.label}" here.', style: muted),
+          child: Text(
+              _filter == McSubjectFilter.needsYou && data.waits.isNotEmpty
+                  ? 'What needs you is the wait above: it names no work item.'
+                  : 'Nothing under "${_filter.label}" here.',
+              style: muted),
         ),
       ];
     }

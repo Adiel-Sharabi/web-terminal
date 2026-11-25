@@ -16,9 +16,11 @@ import 'package:ai_terminal/api/mc_models.dart';
 import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/mission_control/lines_view.dart';
 import 'package:ai_terminal/screens/mission_control/mc_home.dart';
+import 'package:ai_terminal/screens/mission_control/project_view.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/mission_control/start_work_sheet.dart';
 import 'package:ai_terminal/screens/mission_control/subject_screen.dart';
+import 'package:ai_terminal/screens/mission_control/subject_widgets.dart';
 import 'package:ai_terminal/services/mc_feed.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
 import 'package:flutter/material.dart';
@@ -75,6 +77,10 @@ class _Authority {
   final bool withLines;
   final List<http.Request> requests = [];
   String source = 'rule';
+
+  /// #546 - replaces the fixture's subjects answer; [waits] is its `waits`.
+  Map<String, dynamic>? subjectsBody;
+  List<Object> waits = const [];
   (int, Object) move = (200, {'subject': 'acme/widgets#41', 'line': {'id': _hunt, 'name': 'Bug hunter', 'project': 'web-terminal', 'kind': 'config', 'source': 'override'}});
   (int, Object) start = (200, {'server': 'alpha', 'serverUrl': null, 'sessionId': 'new-1', 'name': 'Web Terminal #1'});
 
@@ -89,7 +95,8 @@ class _Authority {
       return http.Response(jsonEncode(now), 200);
     }
     if (path == '/api/mc/subjects') {
-      final subjects = _json('mc_subjects.json');
+      final subjects = subjectsBody ?? _json('mc_subjects.json');
+      if (waits.isNotEmpty) subjects['waits'] = waits;
       for (final s in (subjects['subjects'] as List).whereType<Map<String, dynamic>>()) {
         s['line'] = _lineRef();
       }
@@ -145,7 +152,149 @@ Widget _home(McFeed feed) => MaterialApp(
       ),
     );
 
+/// #546 - one session "patch-gaps-work" on five items with ONE wait on you that names none of them.
+const _ownerWait = 'OK for one verify-ci re-run on PR 905';
+const _ownerKeys = ['ado:101', 'ado:102', 'ado:103', 'ado:104', 'ado:105'];
+Map<String, dynamic> _waitCard(String id) => {
+      'id': id,
+      'kind': 'wait',
+      'sessionId': 's1',
+      'sessionName': 'patch-gaps-work',
+      'what': _ownerWait,
+      'askedAt': 1767225600000,
+    };
+
+/// The fixture's subjects as five items of one session: each carries only its own stage; the item
+/// at [placed] (a wait that names its ref) carries the card.
+Map<String, dynamic> _ownerSubjects({int? placed}) {
+  final fixture = _json('mc_subjects.json');
+  final base = (fixture['subjects'] as List)[3] as Map<String, dynamic>;
+  return {
+    ...fixture,
+    'subjects': [
+      for (var n = 0; n < _ownerKeys.length; n++)
+        {
+          ...base,
+          'key': _ownerKeys[n],
+          'ref': _ownerKeys[n],
+          'title': 'Gap number ${n + 1}',
+          'waitsOn': n == placed ? 'you' : null,
+          'needsYou': n == placed ? {..._waitCard('alpha|s1|wait:1'), 'subjectKey': _ownerKeys[n]} : null,
+          'buckets': n == placed ? ['active', 'needsYou'] : ['active'],
+        },
+    ],
+  };
+}
+
 void main() {
+  group('#546 a wait shows once', () {
+    test('the wire: waits are read when sent, none from an older server, a card without an id is no wait', () {
+      final s = McSubjects.fromJson({
+        'subjects': [],
+        'waits': [
+          {'card': _waitCard('w1'), 'subjects': _ownerKeys},
+          {'card': _waitCard('w1'), 'subjects': []},
+          {'card': 'x'},
+          7,
+        ],
+      });
+      expect(s.waits.map((w) => w.card.id), ['w1'], reason: 'a repeat of one card is read once');
+      expect(s.waits.single.subjects, _ownerKeys);
+      expect(McSubjects.fromJson({'subjects': []}).waits, isEmpty);
+    });
+
+    testWidgets('five items, one wait with no ref: ONE card above the rows, and no row repeats it', (tester) async {
+      await _size(tester, const Size(900, 2400));
+      final auth = _Authority()
+        ..subjectsBody = _ownerSubjects()
+        ..waits = [
+          {'card': _waitCard('alpha|s1|wait:1'), 'subjects': _ownerKeys}
+        ];
+      final feed = auth.feed();
+      addTearDown(feed.dispose);
+      await feed.refresh();
+      final answered = <String>[];
+      final opened = <String>[];
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: McLineScreen(
+            feed: feed, lineId: _hunt, onOpenSubject: (_) {}, onAnswer: (c) => answered.add(c.id), onOpenSession: opened.add),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectRow), findsNWidgets(5));
+      expect(find.byKey(const ValueKey('mc-waits-title')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-card-alpha|s1|wait:1')), findsOneWidget);
+      expect(find.textContaining(_ownerWait), findsOneWidget, reason: 'once on the page, not once per item');
+      expect(find.textContaining('waits on you'), findsNothing, reason: 'an item keeps only its own stage');
+      expect(find.byKey(const ValueKey('mc-wait-covers')), findsOneWidget);
+      // It is answered where it stands.
+      await tester.tap(find.text('Answer'));
+      expect(answered, ['alpha|s1|wait:1']);
+      // The "Needs you" filter lists no item - and says why, not that nothing is wrong.
+      await tester.tap(find.byKey(const ValueKey('mc-filter-needsYou')));
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectRow), findsNothing);
+      expect(find.text('What needs you is the wait above: it names no work item.'), findsOneWidget);
+    });
+
+    testWidgets('the project page shows the same wait once, above its items', (tester) async {
+      await _size(tester, const Size(900, 2400));
+      final auth = _Authority()
+        ..subjectsBody = _ownerSubjects()
+        ..waits = [
+          {'card': _waitCard('alpha|s1|wait:1'), 'subjects': _ownerKeys}
+        ];
+      final feed = auth.feed();
+      addTearDown(feed.dispose);
+      await feed.refresh();
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: McProjectScreen(
+            feed: feed, projectId: 'web-terminal', onOpenSubject: (_) {}, onAnswer: (_) {}, onOpenSession: (_) {}),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byType(McSubjectRow), findsNWidgets(5));
+      expect(find.byKey(const ValueKey('mc-card-alpha|s1|wait:1')), findsOneWidget);
+      expect(find.textContaining(_ownerWait), findsOneWidget);
+      expect(find.textContaining('waits on you'), findsNothing);
+    });
+
+    testWidgets('a wait naming an item shows no "names none" caption', (tester) async {
+      await _size(tester, const Size(900, 2400));
+      final auth = _Authority()
+        ..subjectsBody = _ownerSubjects()
+        ..waits = [
+          {'card': {..._waitCard('alpha|s1|wait:1'), 'subjectKey': 'ado:101'}, 'subjects': _ownerKeys}
+        ];
+      final feed = auth.feed();
+      addTearDown(feed.dispose);
+      await feed.refresh();
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: McLineScreen(feed: feed, lineId: _hunt, onOpenSubject: (_) {}, onAnswer: (_) {}, onOpenSession: (_) {}),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-card-alpha|s1|wait:1')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-wait-covers')), findsNothing);
+    });
+
+    testWidgets('a wait that names its item is on that item only; no banner', (tester) async {
+      await _size(tester, const Size(900, 2400));
+      final auth = _Authority()..subjectsBody = _ownerSubjects(placed: 2);
+      final feed = auth.feed();
+      addTearDown(feed.dispose);
+      await feed.refresh();
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: McLineScreen(feed: feed, lineId: _hunt, onOpenSubject: (_) {}, onAnswer: (_) {}, onOpenSession: (_) {}),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-waits-title')), findsNothing);
+      expect(find.textContaining('waits on you'), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const ValueKey('mc-subject-row-ado:103')), matching: find.textContaining('waits on you')), findsOneWidget);
+    });
+  });
+
   group('wire', () {
     test('Now carries lines when sent, null when absent (an older server)', () {
       final old = McNow.fromJson(_json('mc_now.json'));

@@ -64,7 +64,8 @@ class McNowView extends StatelessWidget {
         final data = feed.now;
         if (data == null) return _McStateView(feed: feed);
         return RefreshIndicator(
-          onRefresh: feed.refresh,
+          // #550: a pull asks to see the latest list: the cards held back are shown with it.
+          onRefresh: () => feed.refresh(show: true),
           child: LayoutBuilder(builder: (context, box) {
             final wide = box.maxWidth >= kMcNowTwoColumns;
             // A card names its project by id (as a subject does); the same answer names it.
@@ -73,6 +74,7 @@ class McNowView extends StatelessWidget {
               _AnswerNowSection(
                   feed: feed,
                   cards: data.answerNow,
+                  epoch: feed.seenEpoch,
                   hasActions: data.actions.isNotEmpty,
                   projectNames: projectNames,
                   onAnswer: onAnswer,
@@ -234,10 +236,80 @@ Future<void> mcRun(BuildContext context, Future<String?> Function() action) asyn
   }
 }
 
-class _AnswerNowSection extends StatelessWidget {
+/// #546 - the card of one wait on the person as a work item's page, or the banner of a line or
+/// project page, offers it: a thing to DO (#522) is an action card, never phrased as a question;
+/// anything else is answered in place. ONE builder for the subject screen and the banner.
+Widget mcWaitCard(BuildContext context, McFeed feed, McCard card,
+    {required void Function(McCard card) onAnswer, required void Function(String sessionId) onOpenSession, DateTime? now}) {
+  final sessionId = card.sessionId;
+  final open = sessionId == null ? null : () => onOpenSession(sessionId);
+  if (card.isAction) {
+    return McActionCard(
+      key: ValueKey('mc-action-${card.id}'),
+      card: card,
+      now: now,
+      onDone: () => mcRun(context, () => feed.actionDone(card)),
+      onLater: (h) => mcRun(context, () => feed.later(card, h)),
+      onOpenSession: open,
+    );
+  }
+  return McAnswerCard(
+    key: ValueKey('mc-card-${card.id}'),
+    card: card,
+    now: now,
+    onAnswer: () => onAnswer(card),
+    onOpenSession: open,
+    onLater: (h) => mcRun(context, () => feed.later(card, h)),
+    onTodo: () => mcRun(context, () => feed.addTodo(card)),
+    onTell: card.answeredIn == null ? null : () => mcRun(context, () => feed.tellAnswered(card)),
+  );
+}
+
+/// #546 - the waits of [data] that name no work item of their session, each ONCE above the items
+/// (never on every item it covers: five items of one session all said the same line). Empty when
+/// there are none.
+List<Widget> mcWaitBanners(BuildContext context, McFeed feed, McSubjects data,
+    {required void Function(McCard card) onAnswer, required void Function(String sessionId) onOpenSession, DateTime? now}) {
+  if (data.waits.isEmpty) return const [];
+  final muted = Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
+  return [
+    mcSectionTitle(context, 'Waiting on you', key: const ValueKey('mc-waits-title')),
+    for (final w in data.waits)
+      Padding(
+        key: ValueKey('mc-wait-${w.card.id}'),
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          mcWaitCard(context, feed, w.card, onAnswer: onAnswer, onOpenSession: onOpenSession, now: now),
+          if (w.card.subjectKey == null && w.subjects.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
+              child: Text('It names none of the ${w.subjects.length} items it covers here.',
+                  key: const ValueKey('mc-wait-covers'), style: muted),
+            ),
+        ]),
+      ),
+    const SizedBox(height: 8),
+  ];
+}
+
+/// How long after a change above it the card in use is held where it was: the collapse of an
+/// answered card above it runs for [kMcCollapse], and a little more is left for the frame it ends in.
+const Duration kMcAnchorSpan = Duration(milliseconds: 450);
+
+/// #550 - Answer now: the cards the person has on screen, held still.
+///
+/// What is listed is the server's, but WHEN it changes on screen is the person's: a card already
+/// shown keeps its place and its slot in the order while other cards arrive. Those wait behind an
+/// "N new" pill and join the list when the person asks to see the latest ([McFeed.seenEpoch]: the
+/// pill, a pull to refresh, coming back to Mission Control), or at once when no card is shown
+/// (there is nothing to move). A card the server drops goes at once, and the scroll stays anchored
+/// on the card in use so the ones above it never push it. A card the person answered is the one
+/// exception to "goes at once": its "Answered" row stays until it has faded out.
+class _AnswerNowSection extends StatefulWidget {
   const _AnswerNowSection({
     required this.feed,
     required this.cards,
+    required this.epoch,
     required this.onAnswer,
     required this.onOpenSession,
     this.hasActions = false,
@@ -245,7 +317,12 @@ class _AnswerNowSection extends StatelessWidget {
     this.now,
   });
   final McFeed feed;
+
+  /// The server's list, in its order.
   final List<McCard> cards;
+
+  /// [McFeed.seenEpoch]: a new value shows the whole of [cards].
+  final int epoch;
 
   /// #522: something to DO waits on My to-do, so "nothing is stuck on you" would be untrue.
   final bool hasActions;
@@ -255,35 +332,242 @@ class _AnswerNowSection extends StatelessWidget {
   final DateTime? now;
 
   @override
+  State<_AnswerNowSection> createState() => _AnswerNowSectionState();
+}
+
+class _AnswerNowSectionState extends State<_AnswerNowSection> {
+  /// What is on screen, in the order it was shown.
+  late List<McCard> _shown = [...widget.cards];
+
+  /// What each shown card says about itself ([McAnswerCard.onUse]); absent: idle.
+  final Map<String, McCardUse> _use = {};
+  final Map<String, GlobalKey> _boxes = {};
+
+  /// The ids that reported [McCardUse.inUse], the latest last: the person is on the latest one.
+  final List<String> _useOrder = [];
+
+  /// The card the scroll is held on while something above it changes, where its top was, whether a
+  /// hold is running (from [_anchorSince], the stamp of its first frame, for [kMcAnchorSpan]), and
+  /// where the scroll stood when we last set it (a different value is the person's own scrolling).
+  String? _anchorId;
+  double? _anchorY;
+  double _anchorPixels = 0;
+  bool _anchoring = false;
+  Duration? _anchorSince;
+
+  McCardUse _useOf(String id) => _use[id] ?? McCardUse.idle;
+
+  /// A card that is no longer a question the person has: answered (its row is leaving) or gone.
+  bool _spent(String id) => _useOf(id) == McCardUse.answered || _useOf(id) == McCardUse.gone;
+
+  bool _listed(String id) => widget.cards.any((c) => c.id == id);
+
+  @override
+  void didUpdateWidget(_AnswerNowSection old) {
+    super.didUpdateWidget(old);
+    final merge = widget.epoch != old.epoch;
+    if (!merge && identical(widget.cards, old.cards)) return;
+    final live = _shown.where((c) => !_spent(c.id)).toList();
+    final byId = {for (final c in widget.cards) c.id: c};
+    // The whole list when the person asked for it, or when nothing live is shown for a new card to
+    // move. A card the server dropped while its answered row is still leaving keeps that row.
+    // Anything else keeps what is shown, in the order it was shown.
+    if (merge || live.isEmpty) {
+      _shown = [
+        ...widget.cards,
+        for (final c in _shown)
+          if (!byId.containsKey(c.id) && _useOf(c.id) == McCardUse.answered) c,
+      ];
+    } else {
+      final next = [
+        for (final c in _shown)
+          if (byId[c.id] != null) byId[c.id]! else if (_useOf(c.id) == McCardUse.answered) c,
+      ];
+      // Only a card that went, or the "N new" pill coming or going, can move what is below: a poll
+      // that changed nothing on screen holds nothing (and so never fights the person's own scrolling).
+      final shownIds = {for (final c in _shown) c.id};
+      final nextIds = {for (final c in next) c.id};
+      final pillBefore = old.cards.any((c) => !shownIds.contains(c.id));
+      final pillAfter = widget.cards.any((c) => !nextIds.contains(c.id));
+      // The card in use may be the one that went: then the other card in use is the one to hold.
+      if (next.length != _shown.length || pillBefore != pillAfter) {
+        _holdAnchor(_inUseId(except: {for (final id in shownIds) if (!nextIds.contains(id)) id}));
+      }
+      _shown = next;
+    }
+    _forgetUnshown();
+  }
+
+  void _forgetUnshown() {
+    final ids = {for (final c in _shown) c.id};
+    _use.removeWhere((id, _) => !ids.contains(id));
+    _boxes.removeWhere((id, _) => !ids.contains(id));
+    _useOrder.removeWhere((id) => !ids.contains(id));
+  }
+
+  /// A card's own report of itself. The answered row of a card the server no longer lists is done
+  /// with once it has gone.
+  void _onUse(String id, McCardUse use) {
+    if (!mounted) return;
+    // Held before the card changes height: a card that opens is the one the person is on, so it stays;
+    // one that folds or goes holds the card the person is still on (never itself).
+    _holdAnchor(use == McCardUse.inUse ? id : _inUseId(except: {id}));
+    _useOrder.remove(id);
+    if (use == McCardUse.inUse) _useOrder.add(id);
+    setState(() {
+      if (use == McCardUse.idle) {
+        _use.remove(id);
+      } else {
+        _use[id] = use;
+      }
+      if (use == McCardUse.gone && !_listed(id)) {
+        _shown = [for (final c in _shown) if (c.id != id) c];
+        _forgetUnshown();
+      }
+    });
+  }
+
+  // --- the scroll stays anchored on the card in use --------------------------------------------
+
+  /// The card in use that reported last: the one the person is working on ([except]: not these,
+  /// which are just leaving use or going).
+  String? _inUseId({Set<String> except = const {}}) {
+    for (final id in _useOrder.reversed) {
+      if (!except.contains(id) && _useOf(id) == McCardUse.inUse && _boxes.containsKey(id)) return id;
+    }
+    return null;
+  }
+
+  double? _topOf(String id) {
+    final box = _boxes[id]?.currentContext?.findRenderObject();
+    if (box is! RenderBox || !box.attached || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero).dy;
+  }
+
+  /// Called BEFORE something above the card [id] may change its height (the layout it would be
+  /// measured against is still the last one): notes where that card is, and from the next frame on
+  /// scrolls it back there for [kMcAnchorSpan]. The first note of a run wins: the
+  /// target is where the card was before anything moved it. A scroll that is not ours since the
+  /// last note (a finger, a wheel, the scrollbar) starts the run afresh from where the person is.
+  void _holdAnchor(String? id) {
+    if (id == null) return;
+    final pos = Scrollable.maybeOf(context)?.position;
+    if (pos == null || !pos.hasPixels) return;
+    final moved = (pos.pixels - _anchorPixels).abs() > 0.5;
+    if (!_anchoring || _anchorId != id || moved) {
+      final y = _topOf(id);
+      if (y == null) return;
+      _anchorId = id;
+      _anchorY = y;
+      _anchorPixels = pos.pixels;
+    }
+    _anchorSince = null; // the span runs from the next frame
+    if (!_anchoring) {
+      _anchoring = true;
+      _nextAnchorFrame();
+    }
+  }
+
+  /// One more look after the next frame. A post-frame callback does not ask for a frame, so the run
+  /// asks for one itself: it ends [kMcAnchorSpan] after its first frame, never stalls half way.
+  void _nextAnchorFrame() {
+    WidgetsBinding.instance.addPostFrameCallback(_keepAnchor);
+    WidgetsBinding.instance.scheduleFrame();
+  }
+
+  void _keepAnchor(Duration stamp) {
+    if (!mounted || !_anchoring) return;
+    final pos = Scrollable.maybeOf(context)?.position;
+    // The person wins: a finger on the list, or a scroll we did not make (a mouse wheel and the
+    // scrollbar never set isScrollingNotifier, but they move the offset).
+    if (pos == null || !pos.hasPixels || pos.isScrollingNotifier.value || (pos.pixels - _anchorPixels).abs() > 0.5) {
+      _anchoring = false;
+      return;
+    }
+    final id = _anchorId;
+    final want = _anchorY;
+    if (id != null && want != null) {
+      final at = _topOf(id);
+      if (at != null && (at - want).abs() > 0.5) {
+        pos.jumpTo((pos.pixels + (at - want)).clamp(pos.minScrollExtent, pos.maxScrollExtent));
+      }
+    }
+    _anchorPixels = pos.pixels;
+    final since = _anchorSince ??= stamp;
+    if (stamp - since >= kMcAnchorSpan) {
+      _anchoring = false;
+      return;
+    }
+    _nextAnchorFrame();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final shownIds = {for (final c in _shown) c.id};
+    final held = widget.cards.where((c) => !shownIds.contains(c.id)).length;
+    final live = _shown.where((c) => !_spent(c.id)).length;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      mcSectionTitle(context, 'Answer now (${cards.length})',
+      mcSectionTitle(context, 'Answer now ($live)',
           key: const ValueKey('mc-answer-now-title'), hint: 'a session is stuck on you, most blocking first'),
-      if (cards.isEmpty)
+      if (held > 0)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ActionChip(
+              key: const ValueKey('mc-new-pill'),
+              avatar: const Icon(Icons.arrow_upward, size: 16),
+              label: Text('$held new'),
+              tooltip: 'Show the ${held == 1 ? 'card' : 'cards'} that arrived while you were here',
+              onPressed: widget.feed.showLatest,
+            ),
+          ),
+        ),
+      if (live == 0)
         Padding(
           key: const ValueKey('mc-answer-now-empty'),
           padding: const EdgeInsets.symmetric(vertical: 8),
-          child: Text(hasActions ? 'No question waits on you.' : 'Nothing is stuck on you.',
+          child: Text(widget.hasActions ? 'No question waits on you.' : 'Nothing is stuck on you.',
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: AppColors.onSurfaceVariant)),
         ),
-      for (final c in cards)
-        Padding(
-          padding: const EdgeInsets.only(bottom: 8),
+      for (final c in _shown)
+        AnimatedPadding(
+          key: _boxes.putIfAbsent(c.id, GlobalKey.new),
+          duration: kMcCollapse,
+          padding: EdgeInsets.only(bottom: _useOf(c.id) == McCardUse.gone ? 0 : 8),
           child: McAnswerCard(
             key: ValueKey('mc-card-${c.id}'),
             card: c,
-            projectName: c.project == null ? null : projectNames[c.project],
-            now: now,
-            onAnswer: () => onAnswer(c),
-            onOpenSession: c.sessionId == null ? null : () => onOpenSession(c.sessionId!),
-            onLater: (h) => mcRun(context, () => feed.later(c, h)),
-            onTodo: () => mcRun(context, () => feed.addTodo(c)),
+            sent: widget.feed.sentFor(c.id),
+            projectName: c.project == null ? null : widget.projectNames[c.project],
+            now: widget.now,
+            onAnswer: () => widget.onAnswer(c),
+            onOpenSession: c.sessionId == null ? null : () => widget.onOpenSession(c.sessionId!),
+            onLater: (h) => mcRun(context, () => widget.feed.later(c, h)),
+            onTodo: () => mcRun(context, () => widget.feed.addTodo(c)),
             // #547: a wait the person may have answered in another session is told so, in one tap.
-            onTell: c.answeredIn == null ? null : () => mcRun(context, () => feed.tellAnswered(c)),
+            onTell: c.answeredIn == null ? null : () => mcRun(context, () => widget.feed.tellAnswered(c)),
+            onUse: (use) => _onUse(c.id, use),
           ),
         ),
     ]);
   }
+}
+
+/// #550 - what an Answer-now card tells its list about itself.
+enum McCardUse {
+  /// Untouched (or answered and still here: it asks again).
+  idle,
+
+  /// Open, or being answered (inside its Undo window, or on its way): the list holds the scroll on it.
+  inUse,
+
+  /// Answered and folded into its "Answered" row, which is about to fade: not counted.
+  answered,
+
+  /// Answered, faded out and out of the way. It stays, unseen, while the server still lists it (it
+  /// comes back as "not taken" if it is still there after the grace).
+  gone,
 }
 
 /// One Answer-now card: project, ref + title, why it ranks, age, the options, and what
@@ -304,11 +588,22 @@ class McAnswerCard extends StatefulWidget {
     this.onOpenSession,
     this.onReply,
     this.onTell,
+    this.onUse,
+    this.sent,
     this.projectName,
     this.now,
   });
 
   final McCard card;
+
+  /// #550 - the latest answer that went out for this card from anywhere in the app ([McFeed.sentFor]):
+  /// one that was not typed on the card (the answer sheet, the ask dialog) folds it into its
+  /// "Answered" row all the same.
+  final McSent? sent;
+
+  /// #550 - told whenever what the card is doing changes ([McCardUse]): the list holds the scroll on
+  /// a card in use and does not count one that was answered.
+  final void Function(McCardUse use)? onUse;
 
   /// The project's name, when the answer that carried the card names it; else its id.
   final String? projectName;
@@ -331,13 +626,20 @@ class McAnswerCard extends StatefulWidget {
 }
 
 /// Where a reply from the card stands: nothing yet, an option inside its Undo window, on its
-/// way, sent (the card should go), or sent and still here after [kMcSentGrace] (the session did
-/// not take it: the card answers again).
+/// way, sent (#550: the card folds into its "Answered" row, then fades out), or sent and still
+/// listed after [kMcSentGrace] (the session did not take it: the card is back and answers again).
 enum _McReplyPhase { idle, undo, sending, sent, stale }
 
 class _McAnswerCardState extends State<McAnswerCard> {
   bool _open = false;
   _McReplyPhase _phase = _McReplyPhase.idle;
+
+  /// #550 - while [_phase] is sent: the "Answered" row is fading, then out of the way (no space).
+  bool _faded = false;
+  bool _hidden = false;
+  Timer? _fadeTimer;
+  Timer? _hideTimer;
+  McCardUse _reported = McCardUse.idle;
 
   /// #541 - the AskUserQuestion on the session's screen, read each time a question card is opened
   /// (it may have changed since it was last shown); null while the card is folded. The future never
@@ -362,11 +664,60 @@ class _McAnswerCardState extends State<McAnswerCard> {
   /// Runs out [kMcSentGrace] after a send; a card still here then was not taken.
   Timer? _sentTimer;
 
+  /// The [McSent.seq] of the latest answer this card has taken account of (set in [initState]: a
+  /// lazy initializer would first run in [didUpdateWidget], against the new widget).
+  int _sentSeen = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _sentSeen = widget.sent?.seq ?? 0;
+  }
+
+  @override
+  void didUpdateWidget(McAnswerCard old) {
+    super.didUpdateWidget(old);
+    final s = widget.sent;
+    if (s == null || s.seq == _sentSeen) return;
+    _sentSeen = s.seq;
+    // An answer typed on this card is already on its way through [_deliver]; one that went out from
+    // the answer sheet or the ask dialog folds an idle card (or one that came back as "not taken").
+    // Told after the frame: the list is told of a change of use, and it is building now.
+    if (_phase != _McReplyPhase.idle && _phase != _McReplyPhase.stale) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || (_phase != _McReplyPhase.idle && _phase != _McReplyPhase.stale)) return;
+      _set(() {
+        _phase = _McReplyPhase.sent;
+        _choice = s.shown;
+        _faded = false;
+        _hidden = false;
+      });
+      _armSentTimers();
+    });
+  }
+
   @override
   void dispose() {
     _sentTimer?.cancel();
+    _fadeTimer?.cancel();
+    _hideTimer?.cancel();
     _text.dispose();
     super.dispose();
+  }
+
+  /// What the list is told this card is doing (#550).
+  McCardUse get _use {
+    if (_phase == _McReplyPhase.sent) return _hidden ? McCardUse.gone : McCardUse.answered;
+    return _open || _busy ? McCardUse.inUse : McCardUse.idle;
+  }
+
+  /// [setState], then tells the list when the card's use changed.
+  void _set(VoidCallback fn) {
+    setState(fn);
+    final use = _use;
+    if (use == _reported) return;
+    _reported = use;
+    widget.onUse?.call(use);
   }
 
   /// The reply path, when this card can use one: an ask, a possible unreported question or a
@@ -389,7 +740,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
   /// Context and options to show, a sentence to answer, or a question on its session's screen.
   bool get _expandable => widget.card.decision != null || widget.card.isPossibleAsk || _port != null;
 
-  void _toggle() => setState(() {
+  void _toggle() => _set(() {
         _open = !_open;
         final port = _port;
         _pending = _open && port != null
@@ -430,7 +781,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
       unawaited(_deliver(send, label));
       return;
     }
-    setState(() {
+    _set(() {
       _phase = _McReplyPhase.undo;
       _choice = label;
     });
@@ -447,7 +798,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
     if (t == null || seq != _pickSeq) return;
     t.cancel();
     _undoTimer = null;
-    if (mounted) setState(() => _phase = _McReplyPhase.idle);
+    if (mounted) _set(() => _phase = _McReplyPhase.idle);
   }
 
   /// Runs [send]; true when it went out. A refusal was said by the sender and leaves the card as
@@ -455,7 +806,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
   /// [shown] is what the status line says was sent.
   Future<bool> _deliver(Future<bool> Function() send, String shown) async {
     if (mounted) {
-      setState(() {
+      _set(() {
         _phase = _McReplyPhase.sending;
         _choice = shown;
       });
@@ -466,16 +817,47 @@ class _McAnswerCardState extends State<McAnswerCard> {
     } catch (e) {
       if (mounted) showTimedSnackBar(context, 'Could not send: ${e is ApiException ? e.message : '$e'}');
     }
-    if (mounted) setState(() => _phase = ok ? _McReplyPhase.sent : _McReplyPhase.idle);
     _sentTimer?.cancel();
-    // The card goes when the server drops the ask. One that is still here after the grace was not
-    // taken (the agent's screen swallowed the line, #179): it answers again, never stays locked.
-    if (ok && mounted) {
-      _sentTimer = Timer(kMcSentGrace, () {
-        if (mounted && _phase == _McReplyPhase.sent) setState(() => _phase = _McReplyPhase.stale);
+    _fadeTimer?.cancel();
+    _hideTimer?.cancel();
+    if (mounted) {
+      _set(() {
+        _phase = ok ? _McReplyPhase.sent : _McReplyPhase.idle;
+        _faded = false;
+        _hidden = false;
       });
     }
+    // #550: an answer that went out folds the card into its "Answered" row at once, and the row
+    // fades out; the card does not wait for the server to drop it (it does so within seconds, and
+    // the next poll is further off than that). It is kept, unseen, while the server lists it: one
+    // still listed after the grace was not taken (the agent's screen swallowed the line, #179) and
+    // comes back, answering again - it never stays locked.
+    if (ok && mounted) _armSentTimers();
     return ok;
+  }
+
+  /// The "Answered" row's clocks (#550): it fades after [kMcAnsweredShow] and is out of the way
+  /// [kMcAnsweredFade] later; [kMcSentGrace] after the answer a card still sent is "not taken".
+  void _armSentTimers() {
+    _sentTimer?.cancel();
+    _fadeTimer?.cancel();
+    _hideTimer?.cancel();
+    _fadeTimer = Timer(kMcAnsweredShow, () {
+      if (!mounted || _phase != _McReplyPhase.sent) return;
+      setState(() => _faded = true);
+      _hideTimer = Timer(kMcAnsweredFade, () {
+        if (mounted && _phase == _McReplyPhase.sent) _set(() => _hidden = true);
+      });
+    });
+    _sentTimer = Timer(kMcSentGrace, () {
+      if (mounted && _phase == _McReplyPhase.sent) {
+        _set(() {
+          _phase = _McReplyPhase.stale;
+          _faded = false;
+          _hidden = false;
+        });
+      }
+    });
   }
 
   Future<void> _sendTyped() async {
@@ -493,9 +875,45 @@ class _McAnswerCardState extends State<McAnswerCard> {
       _McReplyPhase.idle => null,
       _McReplyPhase.undo => 'About to answer "$w" - Undo stops it',
       _McReplyPhase.sending => 'Sending "$w"...',
-      _McReplyPhase.sent => 'Sent "$w". The card goes once the session has it.',
-      _McReplyPhase.stale => 'Sent "$w", but the card is still here - the session may not have taken it. Answer again if you need to.',
+      // The card is folded into its "Answered" row while sent (#550): it shows no status line.
+      _McReplyPhase.sent => null,
+      _McReplyPhase.stale => 'Not taken: "$w" was sent, but the session still asks. Answer again if you need to.',
     };
+  }
+
+  /// #550 - the slim row an answered card folds into: what was answered, and which card it was.
+  Widget _answeredRow(BuildContext context) {
+    final theme = Theme.of(context);
+    final c = widget.card;
+    final what = [?c.ref, ?c.title].join('  ');
+    return AnimatedOpacity(
+      opacity: _faded ? 0 : 1,
+      duration: kMcAnsweredFade,
+      child: Card(
+        margin: EdgeInsets.zero,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(children: [
+            const Icon(Icons.check_circle_outline, size: 18, color: AppColors.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text.rich(
+                TextSpan(children: [
+                  TextSpan(
+                      text: (_choice ?? '').isEmpty ? 'Answered' : 'Answered: $_choice',
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  if (what.isNotEmpty)
+                    TextSpan(text: '   $what', style: theme.textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant)),
+                ]),
+                key: const ValueKey('mc-card-answered'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   /// What an opened question card shows of its question: the options of a simple one, to answer
@@ -545,7 +963,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
     final status = _status;
     // The reply box and the rows only answer when a reply path exists.
     final onPick = reply == null || decision == null ? null : _pickOption;
-    return Card(
+    final face = Card(
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
@@ -643,7 +1061,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
               Row(children: [
                 Expanded(
                   child: Text(status,
-                      key: ValueKey(_phase == _McReplyPhase.sent ? 'mc-card-sent' : 'mc-card-status'),
+                      key: const ValueKey('mc-card-status'),
                       maxLines: 3,
                       overflow: TextOverflow.ellipsis,
                       style: small?.copyWith(color: AppColors.primary)),
@@ -678,7 +1096,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
                 TextButton.icon(
                   key: const ValueKey('mc-card-answer'),
                   // #541: an ask is answered on the card, not in a dialog over it.
-                  onPressed: c.usesReplyDialog && reply != null ? () => setState(() => _open = true) : widget.onAnswer,
+                  onPressed: c.usesReplyDialog && reply != null ? () => _set(() => _open = true) : widget.onAnswer,
                   icon: const Icon(Icons.reply, size: 18),
                   label: const Text('Answer'),
                 ),
@@ -735,6 +1153,12 @@ class _McAnswerCardState extends State<McAnswerCard> {
           ]),
         ),
       ),
+    );
+    // #550: an answered card folds into its row at once; the row fades and leaves no space.
+    return AnimatedSize(
+      duration: kMcCollapse,
+      alignment: Alignment.topCenter,
+      child: _phase == _McReplyPhase.sent ? (_hidden ? const SizedBox.shrink() : _answeredRow(context)) : face,
     );
   }
 }

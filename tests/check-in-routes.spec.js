@@ -16,6 +16,7 @@ const { test, expect, request: pwRequest } = require('@playwright/test');
 const { BASE, authCtx, readHookToken, claudeProjectsRoot } = require('./test-helpers');
 
 const TAG = '[web-terminal check-in]';
+const SUPERVISOR_TAG = '[web-terminal supervisor]'; // lib/user-turn.js SUPERVISOR_PROMPT_TAG: what the gated prompt route types
 const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
 const HANDOFF_DIR = process.env.WT_HANDOFF_DIR || path.join(__dirname, '..', 'handoffs.test');
 const LOG = path.join(HANDOFF_DIR, 'check-in-log.jsonl');
@@ -66,6 +67,16 @@ const logOf = (id) => (fs.existsSync(LOG) ? fs.readFileSync(LOG, 'utf8') : '').s
 const SKIPS = path.join(HANDOFF_DIR, 'check-in-skips.jsonl'); // #463
 const skipsOf = (id) => (fs.existsSync(SKIPS) ? fs.readFileSync(SKIPS, 'utf8') : '').split('\n')
   .filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id);
+// #540 - the usage ledger this suite's server appends its decisions to (playwright.config.js), and the fake
+// `claude -p` the pre-check runs (tests/fixtures/fake-precheck-cli.js): its mode.json and what it recorded.
+const LEDGER = process.env.WT_USAGE_LEDGER_FILE || path.join(HANDOFF_DIR, 'usage-ledger.test.jsonl');
+const ledgerOf = (id) => (fs.existsSync(LEDGER) ? fs.readFileSync(LEDGER, 'utf8') : '').split('\n')
+  .filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.id === id.slice(0, 8));
+const FAKE_DIR = process.env.FAKE_PRECHECK_DIR;
+const setFake = (mode) => { fs.mkdirSync(FAKE_DIR, { recursive: true }); fs.writeFileSync(path.join(FAKE_DIR, 'mode.json'), JSON.stringify(mode)); };
+const fakeRuns = () => (fs.existsSync(FAKE_DIR) ? fs.readdirSync(FAKE_DIR).filter((f) => f.startsWith('run-')) : [])
+  .map((f) => JSON.parse(fs.readFileSync(path.join(FAKE_DIR, f), 'utf8')));
+const clearFake = () => { fs.rmSync(FAKE_DIR, { recursive: true, force: true }); };
 
 test.describe('#443 check-in - server', () => {
   test.setTimeout(120000);
@@ -106,11 +117,13 @@ test.describe('#443 check-in - server', () => {
   test.beforeEach(async () => {
     ctx = await authCtx(); made = [];
     cfgBefore = fs.existsSync(CFG_FILE) ? fs.readFileSync(CFG_FILE, 'utf8') : null;
+    clearFake();
   });
   test.afterEach(async () => {
     for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
     await ctx.dispose();
     fs.rmSync(FIXTURE_DIR, { recursive: true, force: true });
+    clearFake();
     // Never delete it: a missing file is skipped by _refreshLiveConfig, which would pin the
     // short clocks in the server's cache for the rest of the run.
     fs.writeFileSync(CFG_FILE, cfgBefore === null ? '{}' : cfgBefore);
@@ -401,7 +414,7 @@ test.describe('#443 check-in - server', () => {
   test('#463 an answered check-in is asked again after repeatMin, and counted', async () => {
     const id = await endedTurn(`checkin-repeat-${Date.now()}`, { on: 'self', what: 'wait for the build' });
     // repeatMin 0.1 min: the second ask is due 6 s after the first answer, not at once.
-    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, repeatMin: 0.1 } });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, repeatMin: 0.1, changeCheckMin: 0.05 } });
     const ci = await until(async () => (await rowOf(id))?.checkIn, 'a check-in');
     await until(async () => (await scrollback(id)).includes(TAG), 'the check-in in the terminal');
     const conv = crypto.randomUUID();
@@ -409,13 +422,200 @@ test.describe('#443 check-in - server', () => {
     expect(await report(id, { on: 'self', what: 'a new watcher on the build' })).toBe(200);
     expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
     await until(async () => { const r = await rowOf(id); return r?.checkIn?.state === 'stuck' && r.status === 'idle'; }, 'answered');
-    // Inside repeatMin: not asked again.
-    await sleep(2000);
+    // #540 - the first look after the answer records the world it left (the baseline) ...
+    await until(async () => (await rowOf(id))?.brief?.checkIn?.base, 'the baseline');
+    // ... so the clock alone (repeatMin passes) asks nothing: the check-in is not repeated on an unchanged world.
+    await sleep(8000);
     expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(1);
-    // Past it: asked again, as the second check-in of the same idle period.
+    expect((await rowOf(id)).checkIn.state).toBe('stuck');
+    // The session reports a different wait (its world moved): now the ladder's clock asks.
+    expect(await report(id, { on: 'self', what: 'a different watcher on the build' })).toBe(200);
     const again = await until(async () => { const c = (await rowOf(id))?.checkIn; return c && c.sentAt > ci.sentAt ? c : null; }, 'the repeat check-in', 30000);
     expect(again.state).toBe('sent');
     expect(logOf(id).filter((l) => l.event === 'sent').map((l) => l.n)).toEqual([1, 2]);
+  });
+
+  test('#540 layer 1: an answered check-in on an unchanged world is not asked again; the ledger says so once', async () => {
+    const id = await endedTurn(`checkin-unchanged-${Date.now()}`, { on: 'external', what: 'review of the PR' });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, externalMin: 0.01, repeatMin: 0.05, changeCheckMin: 0.05 } });
+    await until(async () => (await rowOf(id))?.checkIn, 'the first check-in');
+    const conv = crypto.randomUUID();
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: `${TAG} You have been idle 1 min.` })).toBe(200);
+    expect(await report(id, { on: 'external', what: 'review of the PR' })).toBe(200);
+    expect(await hook(id, 'Stop', { session_id: conv })).toBe(200);
+    await until(async () => (await rowOf(id))?.checkIn?.state === 'external', 'the answer');
+    await until(async () => (await rowOf(id))?.brief?.checkIn?.base, 'the baseline');
+    // The clock is due (3 s) many times over; nothing moved: no second check-in, one ledger line.
+    const held = await until(async () => ledgerOf(id).find((l) => l.decision === 'skipped'), 'the ledger line for the held check-in', 20000);
+    expect(held).toMatchObject({ event: 'check-in', by: 'rule', why: 'external', n: 2, changed: [] });
+    expect(held.machine).toBeTruthy();
+    await sleep(4000);
+    expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(1);
+    expect(ledgerOf(id).filter((l) => l.decision === 'skipped')).toHaveLength(1);
+    expect(skipsOf(id).some((l) => l.reason === 'unchanged')).toBe(true);
+    // The first check-in was a wake, recorded with the session's context size (none reported here).
+    expect(ledgerOf(id).filter((l) => l.decision === 'woken')).toHaveLength(1);
+    // Something moves (a PR item appears on its report): asked again, as the second of the period.
+    expect(await ctx.post(`/api/session/${id}/report`, { data: { items: [{ ref: '#9', title: 'the PR', state: 'in-progress', stage: 'pr-open' }], wait: { on: 'external', what: 'review of the PR' } },
+      headers: { 'X-WT-Hook-Token': readHookToken() } }).then((r) => r.status())).toBe(200);
+    await until(async () => logOf(id).filter((l) => l.event === 'sent').length === 2, 'the repeat after a change', 30000);
+    expect(logOf(id).filter((l) => l.event === 'sent').map((l) => l.n)).toEqual([1, 2]);
+    // ...and the ledger line of that repeat says what moved (the first, with nothing before it, names nothing).
+    const woken = ledgerOf(id).filter((l) => l.decision === 'woken');
+    expect(woken[0].changed).toBeUndefined();
+    expect(woken[1].changed).toEqual(['i']);
+  });
+
+  /** An external wait the check-in may ask about at once, with the pre-check on the fake CLI. */
+  async function externalIdle(name, config = {}) {
+    const id = await endedTurn(name, { on: 'external', what: 'CI of the PR' });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, externalMin: 0.01, ...config } });
+    return id;
+  }
+
+  test('#540 layer 2: skip - nothing is typed, the verdict and reason are logged, the ledger has it, the model asked is the registry\'s', async () => {
+    setFake({ mode: 'skip', reason: 'CI is still running on the PR' });
+    const id = await externalIdle(`checkin-pre-skip-${Date.now()}`);
+    const row = await until(async () => { const r = await rowOf(id); return r?.checkIn?.state === 'skipped' ? r : null; }, 'the skipped check-in');
+    expect(row.brief.checkIn).toMatchObject({ n: 0, why: 'external', answer: { on: 'external' }, pre: { verdict: 'skip', reason: 'CI is still running on the PR', model: 'haiku' } });
+    await sleep(2500);
+    expect(await scrollback(id)).not.toContain(TAG);
+    expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(0);
+    expect(logOf(id).find((l) => l.event === 'precheck')).toMatchObject({ verdict: 'skip', reason: 'CI is still running on the PR', model: 'haiku', why: 'external' });
+    expect(ledgerOf(id)).toEqual([expect.objectContaining({ event: 'check-in', decision: 'skipped', by: 'precheck', verdict: 'skip', why: 'external', model: 'haiku', n: 1 })]);
+    // It read the session's words and facts, tools off, on the registry's tier - and asked ONCE (a virtual answer holds it).
+    const runs = fakeRuns();
+    expect(runs).toHaveLength(1);
+    expect(runs[0].stdin).toContain('CI of the PR');
+    expect(runs[0].argv).toEqual(expect.arrayContaining(['-p', '--model', 'haiku', '--tools', '']));
+  });
+
+  test('#540 layer 2: tell - a card for the owner, nothing typed', async () => {
+    setFake({ mode: 'tell', reason: 'It asks whether to merge the PR or wait.' });
+    const id = await externalIdle(`checkin-pre-tell-${Date.now()}`);
+    const row = await until(async () => { const r = await rowOf(id); return r?.checkIn?.state === 'told' ? r : null; }, 'the told check-in');
+    expect(row.brief.possibleAsk).toMatchObject({ text: 'Pre-check: It asks whether to merge the PR or wait.' });
+    await sleep(2500);
+    expect(await scrollback(id)).not.toContain(TAG);
+    expect(ledgerOf(id)).toEqual([expect.objectContaining({ decision: 'told', by: 'precheck', verdict: 'tell' })]);
+  });
+
+  test('#540 layer 2: wake, and every failure of the model, types the check-in as it always did', async () => {
+    // wake: typed, and the record carries the verdict.
+    setFake({ mode: 'wake', reason: 'it may have missed the event' });
+    const a = await externalIdle(`checkin-pre-wake-${Date.now()}`);
+    await until(async () => (await scrollback(a)).includes(TAG), 'the check-in in the terminal', 60000);
+    expect(logOf(a).find((l) => l.event === 'sent')).toMatchObject({ verdict: 'wake', reason: 'it may have missed the event', model: 'haiku' });
+    expect(ledgerOf(a)).toEqual([expect.objectContaining({ decision: 'woken', by: 'precheck', verdict: 'wake' })]);
+    // The model fails (exit 1), answers prose, or names a verdict that does not exist: asked anyway, the failure logged.
+    for (const mode of [{ mode: 'exit1' }, { mode: 'bad' }, { mode: 'verdict', verdict: 'ignore' }]) {
+      setFake(mode);
+      const b = await externalIdle(`checkin-pre-fail-${mode.mode}-${Date.now()}`);
+      await until(async () => (await scrollback(b)).includes(TAG), `the check-in despite ${mode.mode}`);
+      expect(logOf(b).find((l) => l.event === 'precheck')).toMatchObject({ verdict: 'wake', failed: expect.any(String) });
+      expect(ledgerOf(b)).toEqual([expect.objectContaining({ decision: 'woken', by: 'rule', reason: expect.stringContaining('pre-check failed') })]);
+    }
+  });
+
+  test('#540 layer 2: "skip" is never honoured where the reading proves the session stranded (stale-self); the off switch asks nobody', async () => {
+    setFake({ mode: 'skip', reason: 'still waiting' });
+    // A reported self-wait with nothing alive can wake it: stale-self. The model's "still pending" is not believed.
+    const id = await endedTurn(`checkin-pre-stale-${Date.now()}`, { on: 'self', what: 'watch the CI run' });
+    await setConfig(FAST);
+    await until(async () => (await scrollback(id)).includes(TAG), 'the check-in despite a skip', 60000);
+    expect(logOf(id).find((l) => l.event === 'sent')).toMatchObject({ why: 'stale-self', verdict: 'wake' });
+    // Off: no model run at all, and the check-in goes out.
+    clearFake();
+    const before = fakeRuns().length;
+    const other = await endedTurn(`checkin-pre-off-${Date.now()}`, { on: 'external', what: 'CI' });
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, externalMin: 0.01 }, checkInPrecheck: { enabled: false } });
+    await until(async () => (await scrollback(other)).includes(TAG), 'the check-in with the pre-check off', 60000);
+    expect(fakeRuns().length).toBe(before);
+  });
+
+  /** A session at 80% of a 1M window, idle, reporting an external wait - the hand-off's candidate (lib/handoff.js). */
+  async function bigExternalIdle(name, config = {}, handoff = {}) {
+    // The previous call's config is still live while this session becomes idle: with check-ins ON it could be
+    // asked (or handed off) under THAT config before this call's own lands. Off first, the real config last.
+    await setConfig({ ...FAST, checkIn: { ...FAST.checkIn, enabled: false } });
+    const r = await ctx.post('/api/sessions', { data: { name, agent: 'claude', autoCommand: LAUNCH } });
+    const id = (await r.json()).id;
+    made.push(id);
+    await until(async () => (await rowOf(id))?.agentReady === true, 'the session to be ready');
+    const tp = transcript(name);
+    const conv = crypto.randomUUID();
+    expect(await hook(id, 'UserPromptSubmit', { session_id: conv, prompt: 'work', transcript_path: tp })).toBe(200);
+    expect(await report(id, { on: 'external', what: 'PR review' })).toBe(200);
+    expect(await hook(id, 'Stop', { session_id: conv, transcript_path: tp })).toBe(200);
+    expect((await ctx.post('/api/claude-status', { data: { session_id: conv, context_window: { context_window_size: 1_000_000, used_percentage: 80 } } })).status()).toBe(200);
+    await until(async () => (await rowOf(id))?.status === 'idle', 'idle');
+    // autoEveryMs 600000 hides the hand-off scan, so a test isolates layer 3's OWN path. Under the default (60 s) the
+    // hand-off scan reaches such a session first - it needs only idleMin - which is why a test of what the two do
+    // TOGETHER passes `autoEveryMs: undefined` (the config then carries no key: the default).
+    await setConfig({ ...FAST, handoff: { ...FAST.handoff, idleMin: 0.01, auto: true, autoEveryMs: 600000, ...handoff }, checkIn: { ...FAST.checkIn, externalMin: 0.01, ...config } });
+    return id;
+  }
+
+  test('#540 layer 3: a wake of a big session idle an hour starts the hand-off instead; the ledger has its size', async () => {
+    const id = await bigExternalIdle(`checkin-handoff-${Date.now()}`, { bigIdleMin: 0.01 });
+    const row = await until(async () => { const r = await rowOf(id); return r?.handoff?.run ? r : null; }, 'the hand-off to start');
+    expect(row.handoff.run).toMatchObject({ state: 'wrapping', trigger: 'auto' });
+    await sleep(1500);
+    // No check-in was typed, and the log and the ledger say what happened and how big the session was.
+    expect(await scrollback(id)).not.toContain(TAG);
+    expect(logOf(id).filter((l) => l.event === 'sent')).toHaveLength(0);
+    expect(logOf(id).find((l) => l.event === 'handed-off')).toMatchObject({ why: 'external', ctxTokens: 800000 });
+    expect(ledgerOf(id)).toEqual([expect.objectContaining({ decision: 'handed-off', by: 'handoff', why: 'external', ctxK: 800 })]);
+  });
+
+  test('#540 layer 3: not idle long enough, or the switch off, or the hand-off refused: the check-in is typed', async () => {
+    test.setTimeout(240000); // three sessions, each with its own config round (5.5 s past the config cache)
+    // Idle only seconds against an hour's bigIdleMin: the wake is a check-in.
+    const a = await bigExternalIdle(`checkin-handoff-short-${Date.now()}`);
+    await until(async () => (await scrollback(a)).includes(TAG), 'the check-in on a session not idle long enough to hand off', 60000);
+    expect((await rowOf(a)).handoff.run).toBeNull();
+    expect(ledgerOf(a)).toEqual([expect.objectContaining({ decision: 'woken', ctxK: 800 })]);
+    // The switch off: the same big idle session is asked.
+    const b = await bigExternalIdle(`checkin-handoff-off-${Date.now()}`, { bigIdleMin: 0.01, handoffInstead: false });
+    await until(async () => (await scrollback(b)).includes(TAG), 'the check-in with handoffInstead off', 60000);
+    expect((await rowOf(b)).handoff.run).toBeNull();
+    // The owner turned the automatic hand-off off (handoff.auto): the hand-off's own gate refuses, and it is asked.
+    const c = await bigExternalIdle(`checkin-handoff-noauto-${Date.now()}`, { bigIdleMin: 0.01 }, { auto: false });
+    await until(async () => (await scrollback(c)).includes(TAG), 'the check-in when the hand-off refuses', 60000);
+    expect((await rowOf(c)).handoff.run).toBeNull();
+    expect(await until(async () => skipsOf(c).find((l) => l.reason === 'handoff-auto-off'), 'the refused hand-off in the skip log')).toMatchObject({ source: 'handoff-instead' });
+  });
+
+  test('#540 layer 3 waits for the hand-off in flight: one run at a time, under the DEFAULT handoff.autoEveryMs', async () => {
+    test.setTimeout(240000);
+    const none = { autoEveryMs: undefined }; // JSON drops it: the config names no interval, so the default (60 s) holds
+    const a = await bigExternalIdle(`checkin-handoff-one-a-${Date.now()}`, { bigIdleMin: 0.01 }, none);
+    // One run starts (the hand-off scan or layer 3, whichever reaches it first) and stays in flight: nothing types its wrap-up.
+    await until(async () => (await rowOf(a))?.handoff?.run, 'the first hand-off', 90000);
+    // A second big idle session, a candidate in every way - and a wake of it would start a SECOND concurrent run.
+    const b = await bigExternalIdle(`checkin-handoff-one-b-${Date.now()}`, { bigIdleMin: 0.01 }, none);
+    await sleep(3000);
+    expect((await rowOf(b)).handoff.run, 'a second run beside the first').toBeNull();
+    await until(async () => skipsOf(b).find((l) => l.reason === 'handoff-busy'), 'the deferral in the skip log', 60000);
+    expect((await rowOf(a)).handoff.run).toMatchObject({ state: 'wrapping' });
+    // Deferred, not typed: neither session was asked, and neither the log nor the ledger says b was woken or handed off.
+    for (const id of [a, b]) expect(await scrollback(id)).not.toContain(TAG);
+    expect(logOf(b).filter((l) => l.event === 'sent' || l.event === 'handed-off')).toHaveLength(0);
+    expect(ledgerOf(b)).toHaveLength(0);
+  });
+
+  test('#540 review: a gated prompt that arrives while a pre-check runs is not refused "busy"', async () => {
+    test.setTimeout(150000);
+    // A session to prompt (it waits on the owner: never checked in on), and one whose pre-check takes 3 s.
+    const quiet = await endedTurn(`checkin-busy-quiet-${Date.now()}`, { on: 'you', what: 'a decision' });
+    setFake({ mode: 'skip', reason: 'CI is still running', delayMs: 3000 }); // the suite's pre-check timeout is 4 s
+    const slow = await externalIdle(`checkin-busy-slow-${Date.now()}`);
+    await until(async () => fakeRuns().length >= 1, 'the pre-check to be running', 60000);
+    // The model is mid-call: nothing is being typed anywhere, so the prompt goes through.
+    const r = await ctx.post(`/api/sessions/${quiet}/prompt`, { data: { text: 'your wait changed' } });
+    expect({ status: r.status(), body: await r.json() }).toEqual({ status: 200, body: { delivered: true } });
+    await until(async () => (await scrollback(quiet)).includes(`${SUPERVISOR_TAG} your wait changed`), 'the prompt in the terminal');
+    await until(async () => (await rowOf(slow))?.checkIn?.state === 'skipped', 'the slow session\'s skipped check-in', 60000);
   });
 
   test('#463 no wait reported since a typed prompt, a watcher still running: asked as live-unreported', async () => {

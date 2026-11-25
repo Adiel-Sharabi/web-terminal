@@ -296,6 +296,32 @@ no wait. Why a session was NOT asked is in `handoffs/check-in-skips.jsonl`: the 
 it (typing, cannot tell, a menu, ...), one line per session when the reason changes and the same
 reason at most every 15 minutes; "no reading yet" is not logged.
 
+**A check-in wakes a whole conversation, so it is asked only when it can learn something (#540).**
+Three layers, cheapest first. (1) **No repeat on an unchanged session:** after an answer, the repeat
+above waits for the session's world to change as well as for the clock: its reported wait, its work
+items, the work listed as running, its child sessions, the tracker state of its items (a PR
+merged or closed), the CI of an open PR finishing, or its wait's deadline (`checkBy`) passing. The first look after an answer records that state; the clock alone never asks
+again. A session whose state cannot be read is never typed to (the same fail-closed rule as before).
+Something that finishes without touching any of those is seen on the next change, not by itself.
+(2) **A cheap pre-check:** before a check-in is typed, a fresh small model (the agent registry's
+cheap tier, Haiku for Claude, tools off) reads the session's last turns and its published state and
+answers `skip` (what it waits on is plainly still pending: nothing typed, held quiet by layer 1),
+`tell` (it needs you: a card on the dashboard, nothing typed) or `wake` (type the check-in as
+before). Any failure of the model, a timeout, an answer that is not one of the three, or a session
+showing an API error means `wake`: the pre-check never makes a check-in rarer by failing. It cannot
+overrule a reading that proves the session stranded (its own wait with nothing alive to wake it, or
+every child stopped). `checkInPrecheck` in `config.json` turns it off (`enabled: false`), overrides
+the model (`model`, a CLI alias) or the timeout (`timeoutMs`). (3) **A big session is handed off,
+not woken:** when the answer is `wake`, the session has been idle `bigIdleMin` (default 60) minutes
+and its context is above the hand-off threshold, the existing hand-off (#340) starts instead, so the
+next wake reads a brief and not the whole conversation (`checkIn.handoffInstead: false` turns that
+off; the hand-off's own gates still apply: its off switch, a Cancel, typing, a draft). Every
+decision (skipped, told, woken, handed off) and the session's context size is appended to the usage
+ledger (`~/.claude/usage-ledger.jsonl`, `WT_USAGE_LEDGER_FILE`), and the check-in log gets
+`precheck` and `handed-off` events and the verdict and reason on `sent`. A session found unchanged
+is compared again only every `checkIn.changeCheckMin` (default 10) minutes. No restart is needed:
+`server.js` and `lib/` only.
+
 **An unsent draft holds the server's prompts (#479)** — the server never types its own prompt
 (a check-in, a hand-off, the restart hold's question, a supervisor wake or close-out) into a
 session whose input box holds text a person typed and did not send: the prompt's Enter would send
@@ -789,6 +815,16 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   question, single choice, no preview, 2+ options) lists its options, a tap answering with the keys
   the answer panel builds after the same Undo; anything else shows no options and **Answer** opens
   the sheet.
+
+  **Answer now holds still (#550, companion):** a card already on screen never moves because
+  another card arrived. New cards wait behind an "N new" pill at the top of Answer now and join when
+  you tap it, pull to refresh, or come back to Mission Control (at once, when nothing is shown);
+  a card the server drops goes, and the scroll stays anchored on the card you have open. An answered
+  card folds into a slim "Answered: <choice>" row at once (not after the next poll), wherever the
+  answer was typed (the card, the answer sheet, the ask dialog); the row fades out, and Now is
+  re-read every 2 seconds for 24 seconds after an answer; a card the server still lists after
+  20 seconds comes back as "not taken - answer again". The Mission Control server is unchanged:
+  from the send to its list the card took about 2 s, the rest was the Undo window and the 10 s poll.
   **Which item a card is about (#541):** a wait or an ask may name its work item (`"ref"`, one of the
   session's own items; a wrong one is refused with the list). A card shows that item's title; with no
   `ref` it takes a session's one bound item before it reports, the one item reported blocked (a wait)
@@ -835,6 +871,11 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   `config.json` `projects[].lines` (listed items, tags, title prefixes, session-name patterns); then
   its tracker parent Feature/Epic; else a line of its own (its run, or the item) - never a
   catch-all. `GET /api/mc/lines`, `POST /api/mc/lines/move`, `?line=` on `/api/mc/subjects`.
+- **A session's wait shows once (#546):** a session on five work items that waits on you used to put
+  the same "waits on you" line on all five (and count five). The wait is now on the one item it
+  names (its `ref`, its only item, the one it reports blocked, or the one its words are about);
+  with none it is one card at the top of the line or project page ("Waiting on you"), counted once
+  per line, project and area (`waits` on `GET /api/mc/subjects`). Each item keeps only its own stage.
 - **Questions with context on demand (#510):** **More context** on an Answer-now card (Now, a
   subject) opens it at three levels - **Just the ask** (and the recommendation), **Context** (the
   work item, what the session did, what each answer does, the inbox digest when one is cached) and

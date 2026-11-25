@@ -36,6 +36,7 @@ const briefLib = require('./lib/session-brief');
 const sessionReasonLib = require('./lib/session-reason');
 const handoffLib = require('./lib/handoff');
 const checkInLib = require('./lib/check-in'); // #443 - check in on a stale self-wait
+const checkInPrecheck = require('./lib/check-in-precheck'); // #540 - a cheap model reads the tail first
 const workItems = require('./lib/work-items'); // #413 - work-item resume: the rules
 const workItemLog = require('./lib/work-item-log');
 const workItemHook = require('./lib/work-item-hook');
@@ -99,7 +100,7 @@ const { DIRS: SCRATCH_DIRS } = require('./scripts/scratch-dirs');
 const { parseStatusPayload, mergeStatus, hasReading } = require('./lib/metrics-claude');
 const fcm = require('./lib/fcm');
 
-const SERVER_VERSION = '1.132.0'; // The RELEASE number: it moves only when the owner cuts a release, never per change. A build is named by the commit hash + date /api/version serves (lib/build-id.js).
+const SERVER_VERSION = '1.133.2'; // The RELEASE number: it moves only when the owner cuts a release, never per change. A build is named by the commit hash + date /api/version serves (lib/build-id.js).
 
 // --- Optional latency instrumentation (opt-in via WT_LATENCY_DEBUG=1) -----
 // Event-loop lag monitor: interval is 10ms; anything ≥ 50ms slip is a stall.
@@ -3539,11 +3540,16 @@ function composerDraftField(id) {
   // ends only when Claude reports a prompt sent; anything else also on an idle Ctrl-C.
   return { since: e.since, release: e.st.picker === true ? 'send' : 'send-or-clear' };
 }
+/** #345 - one hand-off at a time: a run in flight (wrapping..closing) on any session of this server. The
+ *  hand-off scan and the check-in scan's hand-off-instead (#540 layer 3) both wait on it. */
+function handoffRunActive() {
+  return Object.values(briefStore().sessions).some((e) => e && handoffLib.isActive(e.handoff));
+}
 async function autoHandoffScan() {
   const cfg = handoffCfg();
-  if (!cfg.enabled || !cfg.auto || _autoScanBusy || _checkInBusy || Date.now() - _autoScanAt < cfg.autoEveryMs) return; // #443 - never beside a check-in scan
+  if (!cfg.enabled || !cfg.auto || _autoScanBusy || _checkInBusy || Date.now() - _autoScanAt < cfg.autoEveryMs) return; // #443 - never inside a check-in scan's read-then-type
   if (_maint.hold) return; // #359
-  if (Object.values(briefStore().sessions).some((e) => e && handoffLib.isActive(e.handoff))) return;
+  if (handoffRunActive()) return;
   _autoScanBusy = true; _autoScanAt = Date.now();
   try {
     const { sessions } = await workerClient.rpc('listSessions');
@@ -3592,6 +3598,125 @@ function logCheckIn(event, id, rec, extra) {
     fs.appendFileSync(CHECKIN_LOG, `${JSON.stringify(line)}\n`);
   } catch (err) { console.error(`[check-in] log write failed: ${err.message}`); }
 }
+// --- #540 Wake only what needs waking -------------------------------------------------
+// Measured over 14 days (handoffs/check-in-log.jsonl): about 120 of ~170 check-ins got back the wait the
+// session had already reported, and each one on a session idle an hour re-writes its whole context as
+// cache (~130-200k tokens). Three layers, cheapest first, every RULE in lib/check-in.js and
+// lib/check-in-precheck.js (docs/findings/agents-codex.md #540):
+//   1. no repeat without a change (checkInBlock 'unchanged', the baseline below);
+//   2. a small model reads the tail first and says skip / tell / wake (checkInPrecheckFor);
+//   3. a wake of a big session that has been idle an hour starts the existing hand-off instead.
+// Every decision goes to the usage ledger with the session's context size (ledgerCheckIn).
+// Config `checkInPrecheck` ({enabled, model, command, timeoutMs}) is NOT in ALLOWED_CONFIG_KEYS:
+// `command` is something this server EXECUTES (the inbox digest's and the Analyst's rule). The
+// model is the registry's cheap tier for the session's agent (lib/agents.js cheapModel) unless
+// `model` names another.
+function checkInPrecheckConfig() {
+  const live = liveConfig('checkInPrecheck', {});
+  const c = live && typeof live === 'object' && !Array.isArray(live) ? { ...live } : {};
+  // Test seams, under WT_TEST only: the suite points the runner at a fake CLI.
+  if (process.env.WT_TEST === '1' && process.env.WT_CHECKIN_PRECHECK_COMMAND) {
+    try { c.command = JSON.parse(process.env.WT_CHECKIN_PRECHECK_COMMAND); } catch { /* ignore a bad override */ }
+  }
+  if (process.env.WT_TEST === '1' && process.env.WT_CHECKIN_PRECHECK_TIMEOUT_MS) c.timeoutMs = Number(process.env.WT_CHECKIN_PRECHECK_TIMEOUT_MS);
+  // A suite that names no fake CLI must never reach the real model: the pre-check is off there.
+  if (process.env.WT_TEST === '1' && !process.env.WT_CHECKIN_PRECHECK_COMMAND) c.enabled = false;
+  return c;
+}
+const checkInPrecheckService = checkInPrecheck.createPrecheckService({
+  getConfig: checkInPrecheckConfig,
+  scratchDir: () => { fs.mkdirSync(SCRATCH_DIRS.precheck, { recursive: true }); return SCRATCH_DIRS.precheck; },
+});
+// The usage ledger claude-memory's usage-monitor.js appends its windows to: one JSON object per
+// line with `at` and `machine`. Under WT_TEST nothing is written unless a spec names a file.
+const USAGE_LEDGER_FILE = process.env.WT_USAGE_LEDGER_FILE || null;
+function usageLedgerFile() {
+  return USAGE_LEDGER_FILE || (process.env.WT_TEST === '1' ? null : path.join(transcriptHome(), '.claude', 'usage-ledger.jsonl'));
+}
+function ledgerCheckIn(decision, by, s, fields) {
+  usageLog.appendRecord(usageLedgerFile(), checkInLib.ledgerRecord({ now: Date.now(), machine: getServerName(), id: s.id, decision, by, ...fields }));
+}
+const _ledgerOnce = new Set(); // `id\0sentAt`: one ledger line per answered check-in the rule held back
+/** The tracker's and the CI's own state of the session's items and their open PRs, as two strings - the `t`
+ *  and `c` parts of lib/check-in.js changeSignature. The tracker CACHE first (fresh for 10 minutes, one refresh
+ *  behind a stale copy: lib/tracker-meta.js); read only for a session whose check-in was answered, a handful a
+ *  day. '' when it names no tracked item (or no open PR). A part whose read FAILED is null, never a string a
+ *  later look could differ from: a timeout, a 401 or a PR list that could not be read is not a change. */
+async function checkInWorld(row) {
+  const items = row && row.brief && Array.isArray(row.brief.items) ? row.brief.items : [];
+  const refs = [];
+  for (const it of items.slice(0, 8)) {
+    const r = it && typeof it.key === 'string' ? trackerMeta.parseRef(it.key) : null;
+    if (r && !r.unqualified && !refs.some((x) => x.key === r.key)) refs.push(r);
+  }
+  if (!refs.length) return { tracker: '', ci: '' };
+  let metas;
+  try { metas = await mcTrackerMeta.getMany(refs); } catch { return { tracker: null, ci: null }; }
+  const unread = metas.some((m) => m.error || m.fetchedAt === null || /could not be read/i.test(m.warning || ''));
+  return { tracker: unread ? null : metas.map(checkInTrackerPart).join(';'), ci: await checkInCiSig(metas) };
+}
+const checkInTrackerPart = (m) => [m.key, m.state || '', m.closed === null || m.closed === undefined ? '' : m.closed,
+  (m.prs || []).map((p) => `${p.repo}#${p.number}:${p.state || ''}`).join(',')].join('|');
+/** The CI state of the open PRs among [metas] (the items' linked PRs, and an item that is itself an open
+ *  PR), through the one reader of CI the server has: the supervisor's lookup of a `ci` wait target and
+ *  lib/wait-target.js fromLookup, with its cache (a lookup is shared with a wait on the same PR). The source
+ *  APIs of the tracker cache do not carry check state. null when any lookup failed. */
+async function checkInCiSig(metas) {
+  const targets = checkInLib.ciTargets(metas);
+  if (!targets.length) return '';
+  const cfg = supervisorCfg();
+  const parts = [];
+  for (const t of targets) {
+    const lk = waitTargetLib.lookupKey(t);
+    let c = _sup.lookups[lk];
+    if (!c || Date.now() - c.at >= cfg.resolveEveryMs) { c = { at: Date.now(), ...(await supervisorLookup(t, cfg)) }; _sup.lookups[lk] = c; }
+    const part = checkInLib.ciPart(t, c);
+    if (part === null) return null;
+    parts.push(part);
+  }
+  return parts.join(';');
+}
+/** #540 layer 2 - what the pre-check says about [s] (null: not asked - no cheap model declared by its
+ *  agent, an off switch, or nothing readable). A failure is `{ok:false, reason}` and means "wake". */
+async function checkInPrecheckFor(s, row, { why, idleMin, record, world }) {
+  const model = agentsLib.cheapModel(s.agent);
+  if (!model || !checkInPrecheck.askable(why) || !checkInPrecheckService.enabled()) return null;
+  let turns = [];
+  try {
+    const tpath = await resolveSessionTranscriptPath(s.id);
+    if (tpath) turns = digestWaits.get(tpath).turns || [];
+  } catch { turns = []; }
+  if (!turns.length) return { ok: false, reason: 'no-turns', noModel: true }; // no model ran: it holds no slot of the scan's three
+  const b = row.brief || {};
+  const kids = Array.isArray(row.childSessions) ? row.childSessions : [];
+  const state = {
+    name: (getBriefEntry(s.id) || {}).name || s.name, why, idleMin, wait: b.wait, headline: b.headline, items: b.items,
+    work: (Array.isArray(row.backgroundTasks) ? row.backgroundTasks : []).filter((t) => t && !t.stale).map((t) => t.description || t.kind || 'task'),
+    children: { live: kids.filter((k) => k.live).length, parked: kids.filter((k) => !k.live).length },
+    asked: record && record.answer ? [{ n: checkInLib.askCount(record), on: record.answer.on, what: record.answer.what }] : [],
+  };
+  const r = await checkInPrecheckService.run(checkInPrecheck.buildPrompt({ state, turns }), model);
+  // The world is read only for a verdict that records a baseline (skip, tell): a wake is typed. Here, before the
+  // scan's read-then-type section, so the tracker and CI reads never sit inside it.
+  if (r.ok && r.verdict !== 'wake') r.world = world || await checkInWorld(row);
+  return r;
+}
+/** #540 layer 1 - the clock allowed another check-in and the world has not moved since the answer:
+ *  noted as compared (the next look is changeCheckMin later) and, once per answered check-in, in
+ *  the ledger as a check-in that was not asked. */
+function noteCheckInUnchanged(s, row, why, ctxTokens) {
+  const e = getBriefEntry(s.id);
+  const rec = e && e.checkIn;
+  if (!rec) return;
+  const now = Date.now();
+  setBriefEntry(s.id, { ...e, checkIn: checkInLib.withChecked(rec, now) });
+  const key = `${s.id}\u0000${rec.sentAt}`;
+  if (_ledgerOnce.has(key)) return;
+  _ledgerOnce.add(key);
+  if (_ledgerOnce.size > 500) for (const k of _ledgerOnce) { _ledgerOnce.delete(k); if (_ledgerOnce.size <= 400) break; }
+  ledgerCheckIn('skipped', 'rule', s, { why, n: checkInLib.askCount(rec) + 1, idleMin: (now - checkInLib.idleSince(row, why)) / 60000,
+    ctxTokens, reason: 'unchanged since the last answer', changed: [] });
+}
 // #463 - why a session the cheap pre-check let through was NOT asked: one line when the gate
 // changes, else at most one per SKIP_REPEAT_MS (lib/usage-log.js, the hand-off skips' rule).
 const CHECKIN_SKIPS_FILE = process.env.WT_CHECKIN_SKIPS_FILE || path.join(HANDOFF_DIR, 'check-in-skips.jsonl');
@@ -3606,7 +3731,10 @@ function logCheckInSkip(s, reason, source) {
   usageLog.appendRecord(CHECKIN_SKIPS_FILE, usageLog.skipRecord(
     { id: s.id, name: e.name || s.name, agent: s.agent, reason, source, status: s.status }, now));
 }
-let _checkInScanAt = 0, _checkInBusy = false;
+// _checkInScanning: a scan is running (its own re-entrancy guard, held across the model call). _checkInBusy: the
+// scan is inside its read-then-type section - the flag the hand-off scan and the gated prompt route (safe-prompt
+// `busy`) refuse on, so it is held only there, never across a pre-check (up to 60 s each) or a tracker read.
+let _checkInScanAt = 0, _checkInBusy = false, _checkInScanning = false;
 // Keystrokes are remembered in memory only (_lastInputAt): the typing gate counts from here
 // at least, so a draft typed just before a reload is never submitted with a check-in.
 const CHECKIN_STARTED_AT = Date.now();
@@ -3651,9 +3779,10 @@ async function checkInScan() {
   const cfg = checkInCfg();
   // Never beside the hand-off scan: each reads a row across awaits and then types, and
   // the two must never both type into one session. Each sets its flag before its first await.
-  if (!cfg.enabled || _checkInBusy || _autoScanBusy || Date.now() - _checkInScanAt < cfg.everyMs) return;
+  if (!cfg.enabled || _checkInScanning || _autoScanBusy || Date.now() - _checkInScanAt < cfg.everyMs) return;
   if (_maint.hold) return; // #359 - the hold types its own question
-  _checkInBusy = true; _checkInScanAt = Date.now();
+  _checkInScanning = true; _checkInScanAt = Date.now();
+  let prechecks = 0; // #540 - model runs this scan: a fleet back from an outage is read a few at a time
   try {
     const hcfg = handoffCfg();
     // #456 - children: the row's direct child sessions, live or parked (handoffRowFor).
@@ -3661,6 +3790,7 @@ async function checkInScan() {
       startedAt: CHECKIN_STARTED_AT, hold: Boolean(_maint.hold), liveKnown, children, draft: composerHasDraft(id) });
     const { sessions } = await workerClient.rpc('listSessions');
     for (const s of sessions) {
+      _checkInBusy = false; // the previous session's read-then-type section (below) ended with its `continue`
       // Cheap pre-checks from the list and the raw brief; the full rule decides on the row below.
       if (!agentsLib.checksIn(s.agent) || s.status !== 'idle') continue;
       // #475 - the supervisor's dispatcher is the fleet's supervisor, not one of its sessions: the server
@@ -3671,13 +3801,52 @@ async function checkInScan() {
       const liveKnown = await checkInLiveKnown(s, sessions);
       let row;
       try { row = await handoffRowFor(s.id, sessions); } catch { continue; }
-      const no = checkInLib.checkInBlock(row, opts(s.id, liveKnown, row.childSessions));
-      if (no) { logCheckInSkip(s, no, 'row'); continue; }
+      // #540 layer 1 - an answered check-in is compared with the world its answer left. The first look
+      // after the answer RECORDS that world (the baseline) and asks nothing; a later look finds
+      // 'unchanged' unless the wait, its items, its running work, its children or its tracker moved.
+      const prior = getBriefEntry(s.id);
+      const answered = prior && prior.checkIn && checkInLib.periodOpen(prior.checkIn, prior.turnAt) ? prior.checkIn : null;
+      const world = answered ? await checkInWorld(row) : undefined; // { tracker, ci }: null parts = a failed read
+      const sigNow = () => checkInLib.changeSignature(row, { children: row.childSessions, ...world, now: Date.now() });
+      const noteBase = (note) => { // the record's baseline: written once, a part that could not be read filled in later
+        const cur0 = getBriefEntry(s.id);
+        if (liveKnown && cur0 && cur0.checkIn === answered) {
+          const next = note(answered, sigNow());
+          if (next !== answered) setBriefEntry(s.id, { ...cur0, checkIn: next });
+        }
+      };
+      if (answered && checkInLib.needsBaseline(answered, cfg, Date.now())) {
+        noteBase(checkInLib.withBaseline);
+        continue;
+      }
+      if (answered) noteBase(checkInLib.fillBaseline);
+      const o = { ...opts(s.id, liveKnown, row.childSessions), ...world };
+      const no = checkInLib.checkInBlock(row, o);
+      if (no) {
+        if (no === 'unchanged') noteCheckInUnchanged(s, row, (answered && answered.why) || 'stale-self', checkInLib.ctxTokensOf(row));
+        logCheckInSkip(s, no, 'row');
+        continue;
+      }
+      // #540 layer 2 - a small model reads the tail before a check-in is typed. Awaited HERE, before
+      // the re-read below, so everything that follows is judged on the session as it is after it.
+      const why0 = checkInLib.checkInReading(row, { ...o, now: Date.now() }) || 'stale-self';
+      const idle0 = (Date.now() - checkInLib.idleSince(row, why0)) / 60000;
+      if (prechecks >= 3 && agentsLib.cheapModel(s.agent) && checkInPrecheck.askable(why0)) break;
+      // #540 layer 3 waits its turn like the hand-off scan (one run at a time): a session that a wake would hand off
+      // is deferred - not typed, not asked of the model again every minute - until the run in flight has ended.
+      if (handoffRunActive() && checkInLib.handoffInstead({ verdict: 'wake', why: why0, idleMin: idle0, handoff: row.handoff, cfg })) {
+        logCheckInSkip(s, 'handoff-busy', 'handoff-instead');
+        continue;
+      }
+      const pre = await checkInPrecheckFor(s, row, { why: why0, idleMin: idle0, record: prior && prior.checkIn, world });
+      if (pre && !pre.noModel) prechecks++;
+      // The read-then-type section: from here to this session's `continue`/`break`.
+      _checkInBusy = true;
       let cur;
       try { cur = await workerClient.rpc('getSession', { id: s.id }); } catch { continue; }
       const fresh = { ...row, ...cur, waitingFor: sessionWaitingFor(cur), brief: sessionBriefField(cur) || row.brief };
       fresh.reason = sessionReasonLib.sessionReason(fresh);
-      const noNow = checkInLib.checkInBlock(fresh, opts(s.id, liveKnown, row.childSessions));
+      const noNow = checkInLib.checkInBlock(fresh, { ...opts(s.id, liveKnown, row.childSessions), ...world });
       if (noNow) { logCheckInSkip(s, noNow, 'recheck'); continue; }
       if (fresh.brief.turnAt !== row.brief.turnAt) continue; // a turn began meanwhile
       const e = getBriefEntry(s.id);
@@ -3688,7 +3857,43 @@ async function checkInScan() {
       const idleMin = (now - checkInLib.idleSince(fresh, why)) / 60000;
       // #463 - a repeat in the same idle period counts on from the last one.
       const n = checkInLib.periodOpen(e.checkIn, e.turnAt) ? checkInLib.askCount(e.checkIn) + 1 : 1;
-      const rec = checkInLib.startRecord(now, idleMin, why, n);
+      const verdict = pre && pre.ok ? checkInPrecheck.effectiveVerdict(why, pre.verdict, { reporting: fresh.brief.reporting }) : 'wake';
+      const ctxTokens = checkInLib.ctxTokensOf(fresh);
+      const named = { name: e.name || s.name || null, cwd: s.cwd || null };
+      if (pre && !pre.ok) logCheckIn('precheck', s.id, null, { ...named, verdict: 'wake', failed: pre.reason });
+      if (verdict === 'skip' || verdict === 'tell') {
+        // Nothing is typed. A virtual check-in is recorded as answered (lib/check-in.js skipRecord), so
+        // the period, the count and layer 1's change gate hold the session quiet until something moves.
+        const skipped = checkInLib.skipRecord(now, idleMin, why, checkInLib.periodOpen(e.checkIn, e.turnAt) ? e.checkIn : null, { verdict, reason: pre.reason, model: pre.model, wait: fresh.brief.wait,
+          baseline: checkInLib.changeSignature(fresh, { children: row.childSessions, ...pre.world, now }) });
+        const told = verdict === 'tell' ? { possibleAsk: { text: `Pre-check: ${skipped.pre.reason}`.slice(0, 240), at: now } } : {};
+        setBriefEntry(s.id, { ...e, ...told, checkIn: skipped });
+        logCheckIn('precheck', s.id, skipped, { ...named, verdict, reason: skipped.pre.reason, model: pre.model, ms: pre.ms });
+        ledgerCheckIn(verdict === 'tell' ? 'told' : 'skipped', 'precheck', s, { why, n, idleMin, ctxTokens, verdict, reason: pre.reason, model: pre.model });
+        console.log(`[check-in] ${s.id}: pre-check said ${verdict} (${why}, ${Math.round(idleMin)} min idle)`);
+        continue; // nothing was typed: the next session may be asked in this scan
+      }
+      // Only what TYPES waits for the hand-off scan: it may be mid-read of a row it will type into (a skip or a tell
+      // writes only this record, so the model's answer is kept). Nothing is consumed; the next scan retries.
+      if (_autoScanBusy) break;
+      // #540 layer 3 - a wake of a big session idle an hour is the existing hand-off instead (#340/#393): the
+      // successor answers from a brief and the NEXT wake costs a small context. startHandoff keeps every
+      // hand-off gate (autoBlock: handoff.auto off, a person's Cancel, typing, a draft); refused, the
+      // check-in below is what it always was.
+      const hc = handoffLib.handoffCandidate(fresh, { now, cfg: hcfg, supported: agentsLib.handsOff(fresh.agent) });
+      if (checkInLib.handoffInstead({ verdict, why, idleMin, handoff: hc, cfg })) {
+        if (handoffRunActive()) { logCheckInSkip(s, 'handoff-busy', 'handoff-instead'); continue; } // a run started during the model call
+        const started = startHandoff(s.id, { ...fresh, handoff: hc }, { trigger: 'auto' });
+        if (started.run) {
+          logCheckIn('handed-off', s.id, { sentAt: now, idleMin, why, n }, { ...named, ctxTokens });
+          ledgerCheckIn('handed-off', 'handoff', s, { why, n, idleMin, ctxTokens, verdict, reason: pre && pre.ok ? pre.reason : '', model: pre && pre.ok ? pre.model : '' });
+          console.log(`[check-in] ${s.id}: a hand-off instead of a check-in (${Math.round(ctxTokens / 1000)}k ctx, ${Math.round(idleMin)} min idle)`);
+          break; // one per scan; the hand-off's own prompt is in flight
+        }
+        logCheckInSkip(s, `handoff-${started.why || 'refused'}`, 'handoff-instead');
+      }
+      const rec = { ...checkInLib.startRecord(now, idleMin, why, n),
+        ...(pre && pre.ok ? { pre: { verdict: 'wake', reason: checkInLib.clipReason(pre.reason), model: pre.model, at: now } } : {}) };
       // Recorded FIRST, then typed: the delivery hook can arrive before this returns.
       setBriefEntry(s.id, { ...e, checkIn: rec });
       // #463 - nothing reported: the work listed as running is what it is idle on.
@@ -3704,13 +3909,17 @@ async function checkInScan() {
         if (now2 && now2.checkIn === rec) setBriefEntry(s.id, { ...now2, checkIn: e.checkIn || null });
         continue;
       }
-      logCheckIn('sent', s.id, rec, { name: e.name || s.name || null, cwd: s.cwd || null });
+      logCheckIn('sent', s.id, rec, { ...named, ...(pre && pre.ok ? { verdict: 'wake', reason: rec.pre.reason, model: pre.model } : {}) });
+      // A repeat names what moved since its answer (an older answer with no baseline counts as changed: repeatDue).
+      const changed = answered ? (answered.base ? checkInLib.changedParts(answered.base, checkInLib.changeSignature(fresh, { children: row.childSessions, ...world, now })) : ['no-baseline']) : undefined;
+      ledgerCheckIn('woken', pre && pre.ok ? 'precheck' : 'rule', s, { why, n, idleMin, ctxTokens, verdict: pre && pre.ok ? 'wake' : undefined,
+        reason: pre && pre.ok ? pre.reason : pre ? `pre-check failed: ${pre.reason}` : '', model: pre && pre.ok ? pre.model : '', changed });
       console.log(`[check-in] ${s.id}: asked after ${Math.round(idleMin)} min idle (${why}${n > 1 ? `, ask ${n}` : ''})`);
       break; // one per scan
     }
   } catch (err) {
     console.error(`[check-in] scan: ${err.message}`);
-  } finally { _checkInBusy = false; }
+  } finally { _checkInBusy = false; _checkInScanning = false; }
 }
 
 // A run survives a hot reload on disk; this is what moves it on, and what times it out.
@@ -7078,9 +7287,9 @@ async function _computeMcView(reqUser) {
   // #532 - the dispatcher is the supervisor, not a session of any project.
   const sessions = rows.filter((s) => !mcSubjects.isSupervisor(s)).map((s) => ({ cwd: s.cwd, origin: s.origin, items: s.brief && s.brief.items, bound: boundOf.get(s.id) }));
   // Computed once: GET /api/mc/projects serves it, and its area ids are what ?area= takes.
-  const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects });
+  const projectsOut = projectsLib.projectsView({ projects: cfg.projects, sessions, subjects: view.subjects, waits: view.waits });
   // #523 - one row per line of work (GET /api/mc/lines, /api/mc/now).
-  const linesOut = mcLines.linesView({ subjects: view.subjects, projects: cfg.projects });
+  const linesOut = mcLines.linesView({ subjects: view.subjects, projects: cfg.projects, waits: view.waits });
   return { ...view, nodes, servers, projectsOut, linesOut, configuredLines: mcLines.configuredLines(cfg.projects), generatedAt: now };
 }
 /** The view through a short cache: one compute in flight at a time, and its answer reused for
@@ -7126,6 +7335,14 @@ function mcSubjectsWithDone(subjects) {
   const done = mcNeeds.pruneActionsDone(mcState.actionsDone(), Date.now());
   return subjects.map((s) => (s.needsYou && s.needsYou.kind === 'action' ? { ...s, needsYou: mcNeeds.withDone(s.needsYou, done) } : s));
 }
+/** #546 - the same for the waits that name no item (a card of kind action carries its Done record; a
+ *  question card its questions, as on Now and a subject's page: the card at the top of a line or
+ *  project page is the question's only place). A copy: the cached view is shared. */
+async function mcWaitsWithFaces(waits) {
+  const done = mcNeeds.pruneActionsDone(mcState.actionsDone(), Date.now());
+  const faced = await mcCardFaces(waits.map((w) => w.card));
+  return waits.map((w, i) => ({ ...w, card: w.card.kind === 'action' ? mcNeeds.withDone(w.card, done) : faced[i] }));
+}
 
 app.get('/api/mc/subjects', async (req, res) => {
   const refused = mcRefusal(supervisorAuthority());
@@ -7139,7 +7356,7 @@ app.get('/api/mc/subjects', async (req, res) => {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
     const f = mcSubjects.filterView(v, { project: project.value, area: area.value, line: line.value }, { projectsView: v.projectsOut });
-    res.json({ subjects: mcSubjectsWithDone(f.subjects), runs: f.runs, servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
+    res.json({ subjects: mcSubjectsWithDone(f.subjects), runs: f.runs, waits: await mcWaitsWithFaces(f.waits), servers: v.servers, stages: mcStage.STAGES, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] subjects: ${e.message}`);
     res.status(500).json({ error: 'could not read the cluster sessions' });
@@ -11856,6 +12073,8 @@ async function gracefulShutdown(signal) {
   try { mcState.flush(); } catch {}
   // Mission Control Ask runs (#511), the same way.
   try { mcAnalystService.shutdown(); } catch {}
+  // The check-in pre-check's run (#540), the same way.
+  try { checkInPrecheckService.shutdown(); } catch {}
   console.log(`[${new Date().toISOString()}] Exiting.`);
   process.exit(0);
 }

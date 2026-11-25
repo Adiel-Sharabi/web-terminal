@@ -141,7 +141,7 @@ void main() {
         {1}
       ]);
       expect([for (final f in frames) (f.keys, f.delayMs, f.text, f.other, f.chat)], [for (final f in want) (f.keys, f.delayMs, f.text, f.other, f.chat)]);
-      expect(key('mc-card-sent'), findsOneWidget);
+      expect(key('mc-card-heading'), findsNothing, reason: 'the card folded away once the answer went out');
     });
 
     testWidgets('Undo types nothing, and an option answers again afterwards', (tester) async {
@@ -153,7 +153,7 @@ void main() {
       await tester.tap(find.text('Undo'));
       await _pastUndo(tester);
       expect(answered, isEmpty);
-      expect(key('mc-card-sent'), findsNothing);
+      expect(key('mc-card-heading'), findsOneWidget, reason: 'taken back: the card stays whole, it does not fold');
       await tester.tap(key('mc-card-qopt-2'));
       await tester.pump();
       await _pastUndo(tester);
@@ -171,7 +171,7 @@ void main() {
       await tester.pump();
       await _pastUndo(tester);
       expect(answered, hasLength(1));
-      expect(key('mc-card-sent'), findsNothing, reason: 'it did not go, so it is not said to');
+      expect(key('mc-card-answered'), findsNothing, reason: 'it did not go, so it is not said to');
       expect(key('mc-card-qopt-0'), findsOneWidget);
     });
 

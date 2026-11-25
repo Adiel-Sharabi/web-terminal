@@ -79,6 +79,8 @@ const DIRS = Object.freeze({
   digest: process.env.WT_DIGEST_DIR || path.join(PARENT, 'digest-runs'),
   /** The working directory of Mission Control's Ask runs (#511): the digest's rule, its own folder. */
   analyst: process.env.WT_ANALYST_DIR || path.join(PARENT, 'analyst-runs'),
+  /** The working directory of the check-in pre-check's tools-off runs (#540): the digest's rule, its own folder. */
+  precheck: process.env.WT_PRECHECK_DIR || path.join(PARENT, 'check-in-precheck-runs'),
 });
 
 /** `C:\dev\x\y` -> `/c/dev/x/y`, the form Git Bash needs. */

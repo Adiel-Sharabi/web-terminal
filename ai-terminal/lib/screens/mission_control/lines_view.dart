@@ -152,12 +152,18 @@ class McLineScreen extends StatefulWidget {
     required this.feed,
     required this.lineId,
     required this.onOpenSubject,
+    this.onAnswer,
+    this.onOpenSession,
     this.now,
   });
 
   final McFeed feed;
   final String lineId;
   final void Function(McSubject subject) onOpenSubject;
+
+  /// #546 - answer / open for the waits shown once above the items; null: none is shown.
+  final void Function(McCard card)? onAnswer;
+  final void Function(String sessionId)? onOpenSession;
   final DateTime? now;
 
   @override
@@ -273,6 +279,9 @@ class _McLineScreenState extends State<McLineScreen> {
               McStageBar(stages: l.counts.stages),
             ],
             const SizedBox(height: 12),
+            if (data != null && widget.onAnswer != null && widget.onOpenSession != null)
+              ...mcWaitBanners(context, widget.feed, data,
+                  onAnswer: widget.onAnswer!, onOpenSession: widget.onOpenSession!, now: widget.now),
             Wrap(spacing: 6, runSpacing: 4, children: [
               for (final f in McSubjectFilter.values)
                 ChoiceChip(
@@ -322,7 +331,11 @@ class _McLineScreenState extends State<McLineScreen> {
         Padding(
           key: const ValueKey('mc-line-empty'),
           padding: const EdgeInsets.symmetric(vertical: 16),
-          child: Text('Nothing under "${_filter.label}" here.', style: muted),
+          child: Text(
+              _filter == McSubjectFilter.needsYou && data.waits.isNotEmpty
+                  ? 'What needs you is the wait above: it names no work item.'
+                  : 'Nothing under "${_filter.label}" here.',
+              style: muted),
         ),
       ];
     }
