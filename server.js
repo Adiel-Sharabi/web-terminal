@@ -7890,7 +7890,7 @@ app.get('/api/mc/machines', async (req, res) => {
 app.get('/api/mc/models', (req, res) => {
   const refused = mcRefusal(supervisorAuthority());
   if (refused) return res.status(refused.status).json(refused.json);
-  res.json({ ...modelChoice.catalogue(), generatedAt: Date.now() });
+  res.json({ ...modelChoice.catalogue(mcStart.startCommand(liveConfig('mc', null))), generatedAt: Date.now() });
 });
 
 app.post('/api/mc/start', express.json({ limit: '16kb' }), async (req, res) => {

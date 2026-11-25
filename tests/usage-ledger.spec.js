@@ -219,6 +219,22 @@ test.describe('usage ledger: the cluster merge (pure)', () => {
     expect(U.mergeReports(mk('Home', '11111111', 2, 40), [{ name: 'Office', report: mk('Office', '22222222', 5, 70) }], { top: 1, weeks: 6 }).sessions).toHaveLength(1);
   });
 
+  test('a peer whose lists hold a null or a non-object element is still merged: those elements are skipped, never a 500', () => {
+    const local = mk('Home', '11111111', 2, 40);
+    const peer = mk('Office', '22222222', 5, 70);
+    const ragged = {
+      ...peer,
+      weeks: [null, 7, [], ...peer.weeks.map((w) => ({ ...w, model: { ...w.model, bad: null } }))],
+      sessions: ['x', null, ...peer.sessions],
+      checkIns: { ...peer.checkIns, sessions: [null, ...peer.checkIns.sessions] },
+    };
+    expect(U.isReport(ragged)).toBe(true); // the shape check passes; the elements are what is wrong
+    const merged = U.mergeReports(local, [{ name: 'Office', report: ragged }], { top: 10, weeks: 6 });
+    expect(merged).toEqual(U.mergeReports(local, [{ name: 'Office', report: peer }], { top: 10, weeks: 6 }));
+    expect(merged.machines).toEqual(['Home', 'Office']);
+    expect(merged.weeks[0].unitsM).toBe(110);
+  });
+
   test('an answer that is not a report is left out, not merged', () => {
     const local = mk('Home', '11111111', 2, 40);
     for (const junk of [null, {}, { weeks: 'x' }, { weeks: [], sessions: [], checkIns: null }, 'html']) expect(U.isReport(junk)).toBe(false);
@@ -289,6 +305,28 @@ test.describe('usage ledger: following the files incrementally', () => {
     // Every line it did deliver parsed whole: the half line it landed in was dropped.
     expect(seen.every((x) => Number.isFinite(x))).toBe(true);
     expect(seen).toEqual(Array.from({ length: n }, (_, i) => 200 - n + i));
+  });
+
+  test('a first look whose cut lands exactly at a line start keeps that line; one inside a line drops what is left of it', async () => {
+    const f = path.join(dir, 'cut.jsonl');
+    const NL = String.fromCharCode(10);
+    fs.writeFileSync(f, ['AAAA', 'BBBB', 'CCCC', ''].join(NL)); // 15 bytes; the lines start at 0, 5 and 10
+    const read = async (maxFirstRead) => {
+      const seen = [];
+      await U.createTail(f, (l) => seen.push(l), () => {}, { maxFirstRead }).poll();
+      return seen;
+    };
+    expect(await read(10)).toEqual(['BBBB', 'CCCC']); // the cut is byte 5: the start of BBBB, a whole line
+    expect(await read(5)).toEqual(['CCCC']); // byte 10: the start of CCCC
+    expect(await read(9)).toEqual(['CCCC']); // byte 6: inside BBBB, whose rest is dropped
+    expect(await read(15)).toEqual(['AAAA', 'BBBB', 'CCCC']); // no cut at all
+    // And what is appended after such a first look is read from where it ended, once.
+    const seen = [];
+    const t = U.createTail(f, (l) => seen.push(l), () => {}, { maxFirstRead: 10 });
+    await t.poll();
+    fs.appendFileSync(f, ['DDDD', ''].join(NL));
+    await t.poll();
+    expect(seen).toEqual(['BBBB', 'CCCC', 'DDDD']);
   });
 
   test('the store keeps windows, roll-up days and check-in lines apart, counts what it cannot read, and drops what is older than it keeps', async () => {

@@ -39,5 +39,6 @@
     "subjects": "fix",
     "hunt": "design"
   },
-  "defaultModel": "default"
+  "defaultModel": "default",
+  "modelPlaceable": true
 }

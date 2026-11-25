@@ -30,12 +30,13 @@ test.describe('#533 the kinds of work and the model each suggests', () => {
   });
 
   test('the catalogue a client draws the picker from names every kind, model and default', () => {
-    const c = C.catalogue();
+    const c = C.catalogue(CLAUDE);
     expect(c.kinds.map((k) => k.id)).toEqual(['fix', 'run', 'lookup', 'design']);
     expect(c.kinds.find((k) => k.id === 'design')).toMatchObject({ model: null });
     expect(c.models.map((m) => m.id)).toEqual(['default', 'sonnet', 'haiku']);
     expect(c.defaults).toEqual({ subjects: 'fix', hunt: 'design' });
     expect(c.defaultModel).toBe('default');
+    expect(c.modelPlaceable).toBe(true);
     // Every default names a kind the list holds, and every suggested model is one the picker offers.
     for (const id of Object.values(c.defaults)) expect(c.kinds.some((k) => k.id === id)).toBe(true);
     for (const k of c.kinds) if (k.model) expect(c.models.some((m) => m.id === k.model)).toBe(true);
@@ -143,12 +144,49 @@ test.describe('#533 the session it starts', () => {
   });
 });
 
+test.describe('#533 a start command that cannot take the flag (modelPlaceable)', () => {
+  const BS = String.fromCharCode(92);
+  // bash reads the backslashes of a Windows path as escapes (`C:toolsclaude.exe`), so the shell reader refuses it.
+  const WIN_CLAUDE = `C:${BS}tools${BS}claude.exe --dangerously-skip-permissions`;
+  const CANNOT = [WIN_CLAUDE, 'codex --full-auto', 'echo', 'bash', ''];
+  const CAN = [CLAUDE, './claude', 'npx claude', 'FOO=1 claude --model opus "go"; exit'];
+
+  test('true where applyModel can place the flag, false where it cannot (no claude call, or a line the shell reader refuses)', () => {
+    for (const c of CAN) expect(C.modelPlaceable(c), c).toBe(true);
+    for (const c of CANNOT) expect(C.modelPlaceable(c), c).toBe(false);
+    expect(C.modelPlaceable(undefined)).toBe(false); // no command at all takes nothing
+    // ONE reading of the command: the answer is applyModel's own, never a second look at the text.
+    const modelFlag = require('../lib/model-flag');
+    for (const c of [...CAN, ...CANNOT]) expect(C.modelPlaceable(c), c).toBe(!modelFlag.applyModel(c, 'sonnet').error);
+  });
+
+  test('the catalogue carries it, for the command the authority starts with', () => {
+    expect(C.catalogue(CLAUDE).modelPlaceable).toBe(true);
+    expect(C.catalogue(WIN_CLAUDE).modelPlaceable).toBe(false);
+    expect(C.catalogue('codex --full-auto').modelPlaceable).toBe(false);
+    expect(C.catalogue().modelPlaceable).toBe(false);
+  });
+
+  test('a start that names no model works on those commands; one that names a model is the 400 the flag lets a client avoid', () => {
+    for (const command of [WIN_CLAUDE, 'codex --full-auto']) {
+      const p = plan({}, { command });
+      expect(p.error, command).toBeUndefined();
+      expect(p.autoCommand.startsWith(`${command} "`)).toBe(true);
+      expect(p.model).toBeNull();
+      // The design kind names no model: nothing to place, so it starts too.
+      expect(plan({ kind: 'design' }, { command }).error, command).toBeUndefined();
+      // A kind that suggests a model cannot be honoured on this command: refused in words, never started without it.
+      expect(plan({ kind: 'fix' }, { command }).error, command).toMatch(/--model|claude/);
+    }
+  });
+});
+
 test.describe('#533 one owner', () => {
   test('the companion\'s test fixture is exactly what GET /api/mc/models serves', () => {
     // The Dart tests draw the picker from this file: a server change that leaves it stale would let
     // them pass against a wire the server no longer speaks.
     const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'ai-terminal', 'test', 'fixtures', 'mc_models.json'), 'utf8'));
-    expect(fixture).toEqual(C.catalogue());
+    expect(fixture).toEqual(C.catalogue(CLAUDE));
   });
 
   test('no second table of kinds in the server or the libs', () => {

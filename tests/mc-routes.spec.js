@@ -512,6 +512,39 @@ test.describe('#502/#503 Mission Control routes', () => {
   });
 
 
+  test('GET /api/mc/models says whether the start command can take --model (#533): the picker is drawn only when it can', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-mc-placeable-'));
+    const projects = [{ id: 'widgets', name: 'Widgets', match: { repos: ['acme/widgets'], paths: [dir] } }];
+    const BS = String.fromCharCode(92);
+    // bash reads the backslashes of a Windows path as escapes, so --model cannot be placed in it.
+    const winClaude = `C:${BS}tools${BS}claude.exe --dangerously-skip-permissions`;
+    try {
+      for (const [startCommand, placeable] of [['./claude', true], ['claude --dangerously-skip-permissions', true], [winClaude, false], ['codex --full-auto', false], ['echo', false]]) {
+        await withConfig({ projects, mc: { ado: { org: 'fakeorg' }, startCommand } }, async () => {
+          const ctx = await authCtx();
+          try {
+            const r = await ctx.get('/api/mc/models');
+            expect(r.status(), startCommand).toBe(200);
+            expect((await r.json()).modelPlaceable, startCommand).toBe(placeable);
+            if (!placeable) {
+              // What the flag spares a client: naming a model on such a command is a 400 that starts nothing.
+              const before = (await (await ctx.get('/api/sessions')).json()).length;
+              const here = (await (await ctx.get('/api/mc/machines')).json()).suggested;
+              const bad = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: here, name: 'M533 placeable', kind: 'fix' } });
+              expect(bad.status(), startCommand).toBe(400);
+              expect((await bad.json()).error).toMatch(/--model|claude/);
+              expect((await (await ctx.get('/api/sessions')).json()).length).toBe(before);
+            }
+          } finally {
+            await ctx.dispose();
+          }
+        });
+      }
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a closing shell can still hold it */ }
+    }
+  });
+
   test('start work on a PEER (#512): forwarded to its POST /api/sessions with the stored token; its refusals mapped; its hold read', async () => {
     const PEER = 'http://127.0.0.1:17689';
     const TOKEN = 'mc512-fake-peer-token';

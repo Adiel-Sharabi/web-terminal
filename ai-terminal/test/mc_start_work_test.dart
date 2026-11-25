@@ -141,6 +141,11 @@ void main() {
       expect(McStartModels.fromJson({'kinds': [7, null], 'models': _modelsFixture()['models']}), isNull);
       expect(McStartModels.fromJson({'kinds': _modelsFixture()['kinds'], 'models': []}), isNull);
       expect(McStartModels.fromJson('x'), isNull);
+      // A start command that cannot take --model (`modelPlaceable: false`) draws no picker, like an older
+      // authority; a server that says nothing about it reads as able.
+      expect(McStartModels.fromJson({..._modelsFixture(), 'modelPlaceable': false}), isNull);
+      expect(McStartModels.fromJson({..._modelsFixture(), 'modelPlaceable': true}), isNotNull);
+      expect(McStartModels.fromJson({..._modelsFixture()}..remove('modelPlaceable')), isNotNull);
     });
 
     test('#533 the start answer, a card and a session row carry their model', () {
@@ -346,6 +351,24 @@ void main() {
       await tester.pump();
       await tester.tap(find.byKey(const ValueKey('mc-start-go')));
       await tester.pumpAndSettle();
+      expect(auth.startBodies.single.containsKey('model'), isFalse);
+    });
+
+    testWidgets('a start command that cannot take --model (modelPlaceable false): no picker, and the start sends neither kind nor model', (tester) async {
+      await _size(tester, const Size(900, 1600));
+      final auth = _Authority()..models = {..._modelsFixture(), 'modelPlaceable': false};
+      final feed = auth.feed();
+      await feed.refresh();
+      await tester.pumpWidget(_host(feed, <String>[], projectId: 'web-terminal'));
+      await tester.tap(find.byKey(const ValueKey('open')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-start-kind')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-start-model')), findsNothing);
+      await tester.enterText(find.byKey(const ValueKey('mc-start-refs')), '#5');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single.containsKey('kind'), isFalse);
       expect(auth.startBodies.single.containsKey('model'), isFalse);
     });
 

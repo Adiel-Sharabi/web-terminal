@@ -554,7 +554,7 @@ session and its children are on that line until the session reports a `line` of 
 
 #533, the model per task (`lib/model-choice.js` owns the kinds and what each suggests; `lib/model-flag.js`
 places the flag). The body may also carry `kind` and `model`:
-`GET /api/mc/models` -> `{kinds: [{id, label, model}], models: [{id, label}], defaults: {subjects, hunt}, defaultModel, generatedAt}`.
+`GET /api/mc/models` -> `{kinds: [{id, label, model}], models: [{id, label}], defaults: {subjects, hunt}, defaultModel, modelPlaceable, generatedAt}`.
 The kinds, in the order a picker lists them: `fix` (routine fix or small feature -> `sonnet`), `run`
 (watch, deploy or merge run -> `sonnet`), `lookup` (lookup, status check or build -> `haiku`) and
 `design` (design-heavy, ambiguous or security work -> `model: null`, the default model, no flag).
@@ -567,7 +567,12 @@ or a model that is no model name is a 400 in words. The authority puts `--model 
 launch command and adds one line to the brief, `Model: sonnet for a routine fix or small feature (the
 suggested model for this kind of work).` (it says when the person chose another model, and when the start
 command names its own); the line counts against the brief's room. A start command that cannot take the
-flag (it launches no `claude`) is refused with the reason, never started on another model. The answer's
+flag (it launches no `claude`, or it is a line the shell reader refuses, such as a Windows backslash path)
+is refused with the reason, never started on another model. **`modelPlaceable`** says whether the
+authority's own `mc.startCommand` can take the flag (asked of `lib/model-flag.js` `applyModel`, never a
+second reading of the command): `false` for `codex --full-auto` or `C:\tools\claude.exe ...`, and then the
+companion draws no picker and sends no `kind` / `model`, the same as for an older authority, so the start
+that worked before the picker still works. The answer's
 `model` = what the command names (null = the default model), `kind` = the kind asked for (or null).
 **Peers: no capability flag is needed.** The authority sends a peer only the finished `autoCommand`,
 never a `model` an older server would ignore, so a peer of any version starts with the flag. What a

@@ -1290,7 +1290,9 @@ class McModelChoice {
 
 /// `GET /api/mc/models` (#533): the kinds of work, the model each suggests and the models Start work
 /// lists. Having it at all is how the app knows the authority takes `kind` / `model`: an older one
-/// answers 404 and the sheet draws no picker. A reply with no kinds or no models is the same as none.
+/// answers 404 and the sheet draws no picker. A reply with no kinds or no models is the same as none,
+/// and so is one saying `modelPlaceable: false` (the authority's start command cannot take `--model`: a
+/// choice sent to it would be a 400 on a start that works without one). An absent field reads as true.
 class McStartModels {
   final List<McModelKind> kinds;
   final List<McModelChoice> models;
@@ -1309,9 +1311,11 @@ class McStartModels {
     this.defaultModel = 'default',
   });
 
-  /// Null when the reply cannot draw a picker (no kinds, no models).
+  /// Null when the reply cannot draw a picker (no kinds, no models, or a start command that cannot
+  /// take the flag).
   static McStartModels? fromJson(dynamic json) {
     final m = _map(json);
+    if (m['modelPlaceable'] == false) return null;
     final kinds = _list(m['kinds'], McModelKind.fromJson);
     final models = _list(m['models'], McModelChoice.fromJson);
     if (kinds.isEmpty || models.isEmpty) return null;
