@@ -646,6 +646,20 @@ test.describe('/api/version', () => {
     await ctx.dispose();
   });
 
+  // A build is named by the commit it was made from and that commit's date - the release
+  // number does not move per change, so it cannot tell two builds apart. The suite server
+  // runs from this checkout, so what it reports must be this checkout's HEAD, in full.
+  test('names the build by commit hash and commit date', async () => {
+    const { execFileSync } = require('child_process');
+    const git = (...a) => execFileSync('git', a, { cwd: path.join(__dirname, '..'), encoding: 'utf8', windowsHide: true }).trim();
+    const ctx = await authCtx();
+    const data = await (await ctx.get('/api/version')).json();
+    expect(data.hash).toBe(git('rev-parse', '--short', 'HEAD'));
+    expect(data.date).toBe(git('log', '-1', '--format=%ci'));
+    expect(Number.isNaN(Date.parse(data.date))).toBe(false);
+    await ctx.dispose();
+  });
+
   // G8: capabilities let the companion app feature-gate per server during a
   // rolling upgrade (never assume a homogeneous fleet).
   test('reports a capabilities array advertising the attention/clear features', async () => {

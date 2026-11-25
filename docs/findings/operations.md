@@ -38,21 +38,18 @@ npx playwright test
 node -c server.js
 ```
 
-### 4. Bump Version
+### 4. No version number per change
 
-Bump the version of **whichever artifact the change touches** — this repo ships two, and the PR gate checks per-area:
+A build is named by the **commit hash and commit date** that `GET /api/version` serves as `hash` and `date` (`lib/build-id.js`). They are read once when the server process starts, so they say which code is *running*, not what the checkout holds after a later `git pull`: a deploy check compares `hash` to the commit it expects (`node scripts/wt-build.js --head`, or `--expect <hash>` / a peer name for another machine; `scripts/hot-reload.ps1` runs it after every reload).
 
-| The change touches | Bump |
+The numbers still exist, but a person moves them, not a PR:
+
+| Number | Moves when |
 |---|---|
-| anything outside `ai-terminal/` | `SERVER_VERSION` in `server.js` |
-| anything under `ai-terminal/` | `version:` in `ai-terminal/pubspec.yaml` |
-| both | both |
+| `SERVER_VERSION` in `server.js` | the owner cuts a release (`node scripts/bump-server-version.js [minor / major / x.y.z]`) |
+| `version:` in `ai-terminal/pubspec.yaml` | a companion build is cut for devices (the build scripts read it; Android refuses an install whose build number did not grow) |
 
-- Patch bump (1.0.x) for bug fixes
-- Minor bump (1.x.0) for new features
-- Major bump (x.0.0) for breaking changes
-
-Docs- and CI-only changes still bump `SERVER_VERSION` — the gate deliberately keeps no list of "paths belonging to neither artifact", because such a list rots until it lets a real server change through unbumped. **Never bump `SERVER_VERSION` to satisfy a companion-only PR:** it publishes a server version whose server bytes are identical to the one before it, which destroys the identity the version exists to carry.
+Why not per PR: every PR used to prepend its note to the one `SERVER_VERSION` line, so any two open PRs conflicted on it and each re-merge cost a fresh Windows CI run (~45 min). Master moved three times in four hours on 2026-11-24. The `SERVER_VERSION` line therefore carries no changelog (`tests/build-id.spec.js` fails a line over 400 characters); the note belongs in the PR and the commit. The history that used to live on that line is in git: `git show 857e4ec:server.js` (line 101).
 
 ### 5. Update README.md
 
@@ -174,7 +171,7 @@ Three supervised Node.js processes. See `docs/ARCHITECTURE.md` for the full walk
 - **A cold restart is gated on the runtime deps loading — and that gate exists because it once turned a wedge into an outage.** `scripts/cold-restart.ps1` runs `scripts/check-deps.js` (it *loads* `node-pty` / `express` / `express-ws`, since `require.resolve` succeeds on a package whose native binding is broken) **before the first kill**, and aborts without touching anything if they fail. Rationale: a running Node process serves already-loaded modules from **memory**, so a box whose `node_modules` was destroyed hours ago still answers HTTP 200 and still streams PTYs — while a fresh worker cannot even start (`Cannot find module 'node-pty'`, exit 1), the monitor burns its 5-crash budget and exits, and `server.js` goes with it. **A wedged worker still owns live PTYs; a monitor that gave up owns nothing.** Use `scripts/cold-restart.ps1 -CheckOnly` to audit a peer's tree over `/api/exec` without disturbing it.
   - **NEVER junction or symlink `node_modules` into a git worktree.** `rmdir /s`, `Remove-Item -Recurse` and `git worktree remove --force` all **follow a directory junction and delete the target**. On 2026-07-30 a session did exactly that — `mklink /J <worktree>\node_modules C:\dev\web-terminal\node_modules`, then tore the worktree down — which gutted production (`express` gone, `node-pty` left without `package.json`/`lib`), stalling on the files the live worker held open. Give a worktree its own copy, or invoke the real path (`node ../../node_modules/@playwright/test/cli.js`). To remove an existing junction, delete the **link** with bare `cmd /c rmdir <link>` (no `/s`).
   - **Symptom to recognise:** `/login` returns 200 while everything stateful times out, `error.log` floods with `RPC listSessions timed out after 30000ms` whose *first* entry is `Failed to create session`, `worker.log` stops dead at that instant, and the worker sits at **0% CPU** with a child `OpenConsole.exe` that has no `bash.exe` sibling. That is a blocked worker event loop, not a network or auth fault. Recovery: stop the worker (that releases the lock), `npm install`, relaunch — killing the stillborn `OpenConsole.exe` does **not** help.
-- **Cold-restart practice — when running a cluster, drive a server's restart from a *different* server via its `/api/exec` endpoint** (authenticated with that peer's bearer token). This isolates the kill logic from the process being killed, so a bug in the kill script can't silently leave the target offline. Do it in two phases: (1) `git fetch --all && git pull --ff-only` and verify the new `SERVER_VERSION` on disk (non-disruptive, safe to retry); (2) a detached PowerShell script that kills monitor + worker + server and relaunches `start-server.vbs`.
+- **Cold-restart practice — when running a cluster, drive a server's restart from a *different* server via its `/api/exec` endpoint** (authenticated with that peer's bearer token). This isolates the kill logic from the process being killed, so a bug in the kill script can't silently leave the target offline. Do it in two phases: (1) `git fetch --all && git pull --ff-only` and verify the new commit on disk (`git rev-parse --short HEAD`) (non-disruptive, safe to retry); (2) a detached PowerShell script that kills monitor + worker + server and relaunches `start-server.vbs`; then `node scripts/wt-build.js --head` (or `<peer name> --expect <hash>`) proves the new commit is the one running.
   - The kill filter must match `server.js` / `pty-worker.js` by their full path with `-like` (NOT `-match` — the `\p` in `pty-worker.js` is read as a malformed `\p{...}` regex Unicode class). `monitor.js` has no path in its CommandLine, so identify it by the ParentProcessId of the matched server/worker rather than by name.
   - Because the `/api/exec` request runs *inside* the server being killed, the request dies mid-response. Write the kill script to a temp file and launch it detached (`start /b powershell -WindowStyle Hidden -File ...`) so it survives the parent's death.
 - **To restart manually without a driver (last resort only):**

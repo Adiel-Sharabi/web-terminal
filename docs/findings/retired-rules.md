@@ -61,3 +61,11 @@ signature `classifyUserTurn` does not recognise** — it classifies as `human`, 
 one would put another agent's words in a **"You"** bubble, the teammate-bubble bug this repo
 has already paid for once. A queued teammate message therefore stays invisible in chat; that
 is #250, and its fix is a signature in `lib/user-turn.js`, not a wider gate here.
+
+## Pre-Commit Gate 4 — "Bump the artifact the change touches"
+
+**Why retired:** Owner decision 2026-11-25. Every PR prepended its note to the one `SERVER_VERSION` line, so any two open PRs conflicted on it, and each re-merge cost a fresh ~45 min Windows CI run (master moved three times in four hours on 2026-11-24). A build is now named by the commit hash and commit date `/api/version` serves (`lib/build-id.js`), and the release number moves only when the owner cuts a release. The gate steps ("Version bumped for what changed", with its "same version as another PR" and "line shrank" checks) left `.github/workflows/pr-checks.yml` in the same change.
+
+**Was in** `CLAUDE.md` § Pre-Commit Gates, item 4 (full text in `operations.md` § 4). **Verbatim:**
+
+> **Bump the artifact the change touches** (the PR gate checks per area): outside `ai-terminal/` → `SERVER_VERSION` in `server.js`; under `ai-terminal/` → `version:` in `ai-terminal/pubspec.yaml`; both → both. Patch = fix, minor = feature, major = breaking. Docs/CI-only changes still bump `SERVER_VERSION` (a "neither artifact" path list would rot); **never bump it for a companion-only PR** (a new version with unchanged server bytes). `SERVER_VERSION` sits on one ~400 KB line (literal + changelog comment): never print or diff it whole; **prepend**, keeping the old body as `Prior <ver>: …`; it can never legitimately shrink (`scripts/bump-server-version.js` touches only the literal; the PR gate fails a shrink).

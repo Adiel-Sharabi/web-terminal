@@ -55,6 +55,8 @@ if ($CheckOnly) {
 # The worker must SURVIVE. Recording its pid lets the caller prove it did, which is the
 # one claim a hot reload has to make.
 $workerPidsBefore = ($worker | ForEach-Object { $_.ProcessId }) -join ','
+# The node that runs server.js also runs the build check below - read before the kill.
+$nodeExe = ($server | Select-Object -First 1).ExecutablePath
 Note "before: $msg"
 $server | ForEach-Object { Note "kill server $($_.ProcessId)"; Stop-Process -Id $_.ProcessId -Force }
 
@@ -79,4 +81,25 @@ $workerAfter = (Get-CimInstance Win32_Process -Filter "Name='node.exe'" |
 
 Note "after: listening=$up workerBefore=$workerPidsBefore workerAfter=$workerAfter"
 Write-Output "reloaded: listening=$up  worker survived: before=$workerPidsBefore after=$workerAfter"
+
+# IDENTITY, not just readiness. Answering on the port proves a server is up, not that it is
+# the NEW code - and releases are not numbered per change, so the version string cannot say
+# either. The running build's commit hash can: it is fixed when the process starts, so an
+# old server that survived the kill (or a restart that never happened) reports an older
+# hash than this checkout's HEAD. Exit 0 = same commit, 1 = other code is running,
+# 2 = could not ask (no live token, still starting) - retried, then reported as unverified.
+$build = 'not checked (server not listening or no node found)'
+$buildExit = 2
+if ($up -and $nodeExe) {
+  $check = Join-Path $repo 'scripts\wt-build.js'
+  for ($i = 0; $i -lt 5; $i++) {
+    $build = (& $nodeExe $check --head 2>&1 | Out-String).Trim()
+    $buildExit = $LASTEXITCODE
+    if ($buildExit -ne 2) { break }
+    Start-Sleep -Seconds 3
+  }
+}
+$verdict = switch ($buildExit) { 0 { 'VERIFIED: running the HEAD commit' } 1 { 'NOT VERIFIED: running other code than HEAD' } default { 'UNVERIFIED: could not read the running build' } }
+Note "build: $verdict - $build"
+Write-Output "build: $verdict - $build"
 Note '=== done ==='

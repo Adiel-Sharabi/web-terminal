@@ -71,12 +71,9 @@ npm run syntax-check   # node -c on server.js, monitor.js, pty-worker.js
 npm run lint           # eslint . — must report 0 errors (warnings tolerated)
 ```
 
-### 4. Bump `SERVER_VERSION`
+### 4. Do not bump a version
 
-Increment `SERVER_VERSION` in `server.js` (line 10):
-- Patch (`1.0.x`) for bug fixes
-- Minor (`1.x.0`) for new features
-- Major (`x.0.0`) for breaking changes
+A build is named by its commit hash and date (`GET /api/version` serves `hash` and `date`), so a PR carries no version number. `SERVER_VERSION` in `server.js` is the release number and moves only when a maintainer cuts a release; leave it alone, and do not add a changelog note to its line - the explanation goes in the PR description.
 
 ### 5. Update the docs
 
@@ -140,7 +137,6 @@ Run all three locally before opening the PR — CI is the backstop, not your tes
 
 Each of these is a yes/no with no judgement involved, and each has a line in the [PR template](.github/pull_request_template.md):
 
-- [ ] **`SERVER_VERSION` bumped** in `server.js` — patch for a fix, minor for a feature, major for a break. A PR without a bump cannot be deployed or rolled back cleanly, so it is returned unread.
 - [ ] **One logical change.** One bug fix or one feature per PR. A refactor smuggled inside a fix makes the diff unreviewable and will be asked to split.
 - [ ] **No secrets in the diff** — passwords, tokens, API keys, private keys, `.env`, service-account JSON. Check the whole branch, not just the last commit: `git diff master...HEAD`.
 - [ ] **No personal or machine-specific data** — absolute paths from your machine, hostnames, private IPs, internal project names, real transcript captures.
