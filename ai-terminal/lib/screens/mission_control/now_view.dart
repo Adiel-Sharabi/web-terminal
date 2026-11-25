@@ -278,6 +278,8 @@ class _AnswerNowSection extends StatelessWidget {
             onOpenSession: c.sessionId == null ? null : () => onOpenSession(c.sessionId!),
             onLater: (h) => mcRun(context, () => feed.later(c, h)),
             onTodo: () => mcRun(context, () => feed.addTodo(c)),
+            // #547: a wait the person may have answered in another session is told so, in one tap.
+            onTell: c.answeredIn == null ? null : () => mcRun(context, () => feed.tellAnswered(c)),
           ),
         ),
     ]);
@@ -301,6 +303,7 @@ class McAnswerCard extends StatefulWidget {
     required this.onTodo,
     this.onOpenSession,
     this.onReply,
+    this.onTell,
     this.projectName,
     this.now,
   });
@@ -313,6 +316,10 @@ class McAnswerCard extends StatefulWidget {
   final VoidCallback? onOpenSession;
   final void Function(int hours) onLater;
   final VoidCallback onTodo;
+
+  /// #547 - tells the card's session its wait was answered in another session ([McCard.answeredIn]);
+  /// null: no Tell it (the card is not marked, or the screen cannot send it).
+  final VoidCallback? onTell;
 
   /// #541 - sends the person's reply to the card's session; null: the scope's answer port's
   /// ([McQuestionScope.answerPort]), and with neither the options only explain.
@@ -552,7 +559,10 @@ class _McAnswerCardState extends State<McAnswerCard> {
                   if (c.project != null) McTag(widget.projectName ?? c.project!, key: const ValueKey('mc-card-project')),
                   McTag(c.isPossibleAsk ? 'possible unreported question' : c.kind, muted: true),
                   // #526 - a prompt typed into the session since it asked: it may be settled.
-                  if (c.maybeAnswered) McTag('may be answered', muted: true, key: const ValueKey('mc-card-maybe-answered')),
+                  // #547 - or a wait answered in another session: the tag says which one.
+                  if (c.maybeAnswered)
+                    McTag(c.answeredIn?.name == null ? 'may be answered' : 'may be answered in "${c.answeredIn!.name}"',
+                        muted: true, key: const ValueKey('mc-card-maybe-answered')),
                   if (why.severity != null) McTag('severity ${why.severity}', color: AppColors.caution),
                 ]),
               ),
@@ -600,6 +610,12 @@ class _McAnswerCardState extends State<McAnswerCard> {
             if (decisionQuestion != null) ...[
               const SizedBox(height: 4),
               Text(decisionQuestion, key: const ValueKey('mc-card-decision-question'), style: small),
+            ],
+            // #548: the decision's context, its first line, on the face; the opened card shows it whole.
+            if (!_open && mcContextLine(decision?.context) != null) ...[
+              const SizedBox(height: 4),
+              Text(mcContextLine(decision?.context)!,
+                  key: const ValueKey('mc-card-context-line'), maxLines: 2, overflow: TextOverflow.ellipsis, style: muted),
             ],
             if (decision != null) ...[
               const SizedBox(height: 4),
@@ -665,6 +681,14 @@ class _McAnswerCardState extends State<McAnswerCard> {
                   onPressed: c.usesReplyDialog && reply != null ? () => setState(() => _open = true) : widget.onAnswer,
                   icon: const Icon(Icons.reply, size: 18),
                   label: const Text('Answer'),
+                ),
+              // #547 - one tap to tell the waiting session where it was answered.
+              if (widget.onTell != null)
+                TextButton.icon(
+                  key: const ValueKey('mc-card-tell'),
+                  onPressed: widget.onTell,
+                  icon: const Icon(Icons.forward_to_inbox, size: 18),
+                  label: const Text('Tell it'),
                 ),
               if (widget.onOpenSession != null)
                 TextButton.icon(

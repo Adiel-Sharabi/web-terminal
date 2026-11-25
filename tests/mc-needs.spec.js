@@ -10,6 +10,7 @@ const { test, expect } = require('@playwright/test');
 const M = require('../lib/mc-subjects');
 const N = require('../lib/mc-needs');
 const { createMcState } = require('../lib/mc-state');
+const pj = require('../lib/projects');
 const { createPromptEpisodes } = require('../lib/mc-episodes');
 const { promptOf, PROMPT_BYTES_MAX } = require('../lib/safe-prompt');
 const { clearWait } = require('../lib/session-brief');
@@ -22,13 +23,13 @@ const uid = (tag) => `${tag}-0000-4000-8000-${String(++n).padStart(12, '0')}`;
 
 /** A live row as the cluster view serves it (only the fields MC reads). */
 function row(server, { id = uid('live'), name = 'session', status = 'idle', reason = null, items = [], wait = null,
-  parentId = null, waitingFor = null, turnAt = NOW - 30 * MIN, lastActivity = NOW - 10 * MIN } = {}) {
+  parentId = null, waitingFor = null, turnAt = NOW - 30 * MIN, lastActivity = NOW - 10 * MIN, prompt = null, createdAt = NOW - 2 * HOUR } = {}) {
   return {
     id, name, status, reason, waitingFor, cwd: 'C:\\dev\\widgets', server, serverUrl: server === 'alpha' ? null : `https://${server}.example.test`,
     lastActivity,
     brief: { items: items.map((it) => ({ title: '', state: 'in-progress', note: '', stage: null, source: 'agent', url: null, key: it.ref, ...it })),
-      headline: null, reportAt: NOW - 20 * MIN, wait, turnAt },
-    spawn: { parentId, replaces: [], createdAt: NOW - 2 * HOUR },
+      headline: null, reportAt: NOW - 20 * MIN, wait, turnAt, prompt },
+    spawn: { parentId, replaces: [], createdAt },
   };
 }
 /** A session that reported a `you` wait `ago` minutes back. */
@@ -39,10 +40,10 @@ const asking = (server, what, ago, over = {}) => row(server, {
 const working = (server, over = {}) => row(server, { status: 'working', reason: { kind: 'working', text: '' }, ...over });
 const meta = (key, over = {}) => ({ key, ref: key, title: `Title of ${key}`, url: null, state: 'open', closed: false, prs: [], severity: null, ...over });
 
-function now({ rows = [], metaByKey = {}, todos = [], later = {}, at = NOW, episodes = null } = {}) {
+function now({ rows = [], metaByKey = {}, todos = [], later = {}, at = NOW, episodes = null, projects = [] } = {}) {
   const nodes = M.sessionNodes({ rows, closed: [], now: at });
   if (episodes) episodes.observe(nodes, at);
-  const view = M.buildView({ nodes, metaByKey, projects: [], now: at, platform: 'win32' });
+  const view = M.buildView({ nodes, metaByKey, projects, now: at, platform: 'win32' });
   return N.buildNow({ nodes, view, todos, later, now: at });
 }
 
@@ -58,9 +59,9 @@ test.describe('#506 Answer now: which waits, ranked by what they block', () => {
     const v = now({ rows: [lone, root, mid, leaf] });
     expect(v.answerNow.map((c) => c.sessionName)).toEqual(['leaf', 'lone']);
     const [q, l] = v.answerNow;
-    // #541: a prompt that says nothing of its item is about no item (never the session's first);
-    // what it blocks is still every item of the sessions above it.
-    expect(q).toMatchObject({ kind: 'question', hasQuestion: true, rank: 1, subjectKey: null, ref: null, title: null, server: 'beta', sessionId: leaf.id,
+    // #541/#548: a prompt that says nothing of its item is about the session's ONE item (never the first of
+    // several); what it blocks is still every item of the sessions above it.
+    expect(q).toMatchObject({ kind: 'question', hasQuestion: true, rank: 1, subjectKey: 'ado:3', ref: 'ado:3', title: 'ado:3', server: 'beta', sessionId: leaf.id,
       why: { blocks: 3, subjects: ['ado:3', 'ado:2', 'ado:1'], ageMin: 5, severity: null, text: 'blocks 3 sessions and 3 work items' } });
     expect(q.why.blockedSessions.map((s) => s.name)).toEqual(['leaf', 'lead', 'orchestrator']);
     expect(l).toMatchObject({ kind: 'wait', hasQuestion: false, rank: 2, what: 'pick a schema',
@@ -471,12 +472,15 @@ test.describe('#541 a wait card is about the item it names - never the session\'
     expect(face(card(waitOf('Which colour for the badge?', [noted, B9])))).toEqual([null, null, null]);
   });
 
-  test('a wait never borrows the first item: a session with one item and a wait about something else has no subject', () => {
-    const c = card(waitOf('Which colour for the badge?', [A5]));
+  test('a wait never borrows the first item of SEVERAL; the only item of a session is what its wait is about (#548)', () => {
+    const c = card(waitOf('Which colour for the badge?', [A5, B9]));
     expect(face(c)).toEqual([null, null, null]);
     expect(c.project).toBeNull();
     // What it blocks is still every item of the session (the ranking is not about the title).
-    expect(c.why).toMatchObject({ blocks: 1, subjects: ['ado:5'], text: 'blocks this session and 1 work item' });
+    expect(c.why).toMatchObject({ blocks: 1, subjects: ['ado:5', 'ado:9'], text: 'blocks this session and 2 work items' });
+    const one = card(waitOf('Which colour for the badge?', [A5]));
+    expect(face(one)).toEqual(['ado:5', 'ado:5', 'Landscape on a phone']);
+    expect(one.why).toMatchObject({ blocks: 1, subjects: ['ado:5'], text: 'blocks this session and 1 work item' });
   });
 
   test('a question on screen is about the item its text shares words with, else none', () => {
@@ -495,5 +499,251 @@ test.describe('#541 a wait card is about the item it names - never the session\'
     expect(N.subjectFor(nodes[0], subjects, { ref: 'ado:99', words: 'Landscape on a phone' })).toBeNull();
     expect(N.subjectFor(nodes[0], subjects, { words: 'Landscape on a phone' }).key).toBe('ado:5');
     expect(N.subjectFor(nodes[0], subjects, {})).toBeNull();
+  });
+});
+
+test.describe('#548 a card says what it is about: the session\'s one real item', () => {
+  // SYNTHETIC copy of the reported row: an orchestrator holding one filed item and a `#0`
+  // placeholder (an issue it had not filed yet), asking a decision that names neither.
+  const projects = pj.validateProjects([{ id: 'support', name: 'Support', match: { adoProjects: ['Contoso'] } }]).projects;
+  const metaByKey = { 'ado:7001': meta('ado:7001', { adoProject: 'Contoso', title: 'Split upgrade not migrated' }) };
+  const decision = { question: 'How should the two leftovers be finished so this session can close?',
+    context: 'A rule is on a pushed branch, unmerged (review kept finding gaps). A test VM is held for QA.',
+    options: [{ label: 'Defer both to a work item' }, { label: 'Land the rule as-is' }], recommended: 0 };
+  const REAL = { ref: 'ado:7001', title: 'Split upgrade not migrated', state: 'committed' };
+  const PLACEHOLDER = { ref: 'Owner/Repo#0', key: 'owner/repo#0', title: 'Close-out rule', state: 'in-progress' };
+  const orchestrator = (items, over = {}) => asking('beta', 'rule branch + test VM: land/defer', 40, { name: '#7001 Split upgrade fix (supervisor)', items,
+    wait: { on: 'you', what: 'rule branch + test VM: land/defer', at: NOW - 40 * MIN, decision }, ...over });
+  const card = (r, o = {}) => now({ rows: [r], metaByKey, projects, ...o }).answerNow[0];
+
+  test('ONE real item and nothing else matched: the card is about it, with its project; a `#0` placeholder is no item', () => {
+    for (const items of [[REAL], [REAL, PLACEHOLDER], [PLACEHOLDER, REAL]]) {
+      const c = card(orchestrator(items));
+      expect([c.subjectKey, c.ref, c.title, c.project], JSON.stringify(items.map((i) => i.ref))).toEqual(['ado:7001', 'ado:7001', 'Split upgrade not migrated', 'support']);
+      // The decision's context rides the card (the face shows its first line).
+      expect(c.decision.context).toContain('pushed branch');
+      // What it blocks is the real item alone: no `#0` anywhere in the answer.
+      expect(c.why.subjects).toEqual(['ado:7001']);
+      expect(JSON.stringify(c)).not.toMatch(/#0\b/);
+    }
+  });
+
+  test('the item can be in any state: a session\'s only item is what its card is about', () => {
+    expect(card(orchestrator([{ ...REAL, state: 'done' }])).subjectKey).toBe('ado:7001');
+    expect(card(orchestrator([{ ...REAL, state: 'blocked' }])).subjectKey).toBe('ado:7001');
+  });
+
+  test('SEVERAL real items and no ref, blocked item or shared words: still no borrowed title', () => {
+    const other = { ref: 'ado:7002', title: 'Something unrelated', state: 'in-progress' };
+    const c = card(orchestrator([REAL, other, PLACEHOLDER]));
+    expect([c.subjectKey, c.ref, c.title, c.project]).toEqual([null, null, null, null]);
+    // What it blocks stays every real item (never the placeholder).
+    expect(c.why.subjects).toEqual(['ado:7001', 'ado:7002']);
+  });
+
+  test('the wait\'s own ref and the shared words still decide first; a ref naming no item of the session is none, never the one item', () => {
+    const other = { ref: 'ado:7002', title: 'Something unrelated', state: 'in-progress' };
+    const named = orchestrator([REAL, other], { wait: { on: 'you', what: 'x', at: NOW - 40 * MIN, decision, ref: 'ado:7002' } });
+    expect(card(named).subjectKey).toBe('ado:7002');
+    const missing = orchestrator([REAL], { wait: { on: 'you', what: 'x', at: NOW - 40 * MIN, decision, ref: 'ado:99' } });
+    expect(card(missing).subjectKey).toBeNull();
+  });
+
+  test('an ask follows the same rule (one resolver)', () => {
+    const asked = (items) => {
+      const r = row('beta', { name: 'worker', status: 'working', reason: { kind: 'working', text: '' }, items });
+      r.brief.asks = [{ id: 'abcd1234', question: 'Which build flavour?', context: 'why', options: [{ label: 'a' }, { label: 'b' }], at: NOW - 5 * MIN, maybeAnswered: false }];
+      return now({ rows: [r], metaByKey, projects }).answerNow.find((c) => c.kind === 'ask');
+    };
+    expect(asked([REAL, PLACEHOLDER])).toMatchObject({ subjectKey: 'ado:7001', title: 'Split upgrade not migrated', project: 'support' });
+    expect(asked([REAL, { ref: 'ado:7002', title: 'Other', state: 'in-progress' }])).toMatchObject({ subjectKey: null, title: null });
+  });
+
+  test('the resolver: one real item is the subject; a session with none is about none', () => {
+    const nodes = M.sessionNodes({ rows: [orchestrator([REAL, PLACEHOLDER])], closed: [], now: NOW });
+    const view = M.buildView({ nodes, metaByKey, projects, now: NOW, platform: 'win32' });
+    const subjects = new Map(view.subjects.map((s) => [s.key, s]));
+    expect(view.subjects.map((s) => s.key)).toEqual(['ado:7001']);
+    expect(N.subjectFor(nodes[0], subjects, {}).key).toBe('ado:7001');
+    expect(N.subjectFor(nodes[0], subjects, { ref: 'owner/repo#0' })).toBeNull();
+    const none = M.sessionNodes({ rows: [orchestrator([PLACEHOLDER])], closed: [], now: NOW });
+    expect(N.subjectFor(none[0], new Map(), {})).toBeNull();
+  });
+});
+
+test.describe('#547 a wait answered in another session is marked "maybe answered elsewhere", and Tell it sends the news', () => {
+  const projects = [];
+  const decision = { question: 'Route the PR through the release branch or master?', context: 'Both are possible; the child needs one.',
+    options: [{ label: 'Release branch' }, { label: 'Master' }], recommended: 0 };
+  const ITEM = { ref: 'ado:8001', title: 'Audit port job' };
+  const OTHER = { ref: 'ado:8002', title: 'Unrelated reader bug' };
+  const WAIT_AT = NOW - 30 * MIN;
+  const parentRow = (over = {}) => asking('alpha', 'Child question: PR route', 30, { name: 'parent-orch', items: [ITEM, OTHER],
+    wait: { on: 'you', what: 'Child question: PR route', at: WAIT_AT, decision, ref: 'ado:8001' }, ...over });
+  const childRow = (parent, over = {}) => row('beta', { name: 'WI 8001 audit port', parentId: parent.id, items: [ITEM], status: 'working',
+    reason: { kind: 'working', text: '' }, ...over });
+  const typed = (minAgo, text = 'Use the release branch, as option 1') => ({ text, at: NOW - minAgo * MIN });
+  const parentCard = (rows) => now({ rows, projects }).answerNow.find((c) => c.sessionName === 'parent-orch');
+
+  test('the owner typed into the CHILD after the parent\'s wait was reported: the parent\'s card says where', () => {
+    const p = parentRow();
+    const c = childRow(p, { prompt: typed(10) });
+    const card = parentCard([p, c]);
+    expect(card).toMatchObject({ kind: 'decision', maybeAnswered: true,
+      answeredIn: { server: 'beta', serverUrl: 'https://beta.example.test', sessionId: c.id, name: 'WI 8001 audit port', at: NOW - 10 * MIN } });
+    // The subject's own card for the same wait carries the same mark (one rule, both screens).
+    const nodes = M.sessionNodes({ rows: [p, c], closed: [], now: NOW });
+    const view = M.buildView({ nodes, metaByKey: {}, projects, now: NOW, platform: 'win32' });
+    expect(view.subjects.find((s) => s.key === 'ado:8001').needsYou).toMatchObject({ maybeAnswered: true, answeredIn: { sessionId: c.id } });
+  });
+
+  test('a prompt typed BEFORE the wait was reported, or none at all, marks nothing', () => {
+    const p = parentRow();
+    for (const prompt of [typed(45), null]) {
+      const card = parentCard([p, childRow(p, { prompt })]);
+      expect(card.maybeAnswered ?? false).toBe(false);
+      expect(card.answeredIn).toBeUndefined();
+    }
+  });
+
+  test('another session on the SAME item counts (not a child); one on another item does not', () => {
+    const p = parentRow();
+    const sibling = row('beta', { name: 'reviewer', items: [ITEM], prompt: typed(5) });
+    expect(parentCard([p, sibling]).answeredIn).toMatchObject({ sessionId: sibling.id, name: 'reviewer' });
+    const stranger = row('beta', { name: 'elsewhere', items: [OTHER], prompt: typed(5) });
+    expect(parentCard([p, stranger]).answeredIn).toBeUndefined();
+    // The newest prompt names the session.
+    const later = row('beta', { name: 'newest', items: [ITEM], prompt: typed(2) });
+    expect(parentCard([p, sibling, later]).answeredIn.name).toBe('newest');
+  });
+
+  test('only a reported wait or a decision is marked: a question on screen stays a question', () => {
+    const q = row('alpha', { name: 'parent-orch', status: 'waiting', waitingFor: 'question', reason: { kind: 'you', text: 'answer a question', since: null }, items: [ITEM] });
+    const kid = childRow(q, { prompt: typed(5) });
+    const c = now({ rows: [q, kid], projects }).answerNow[0];
+    expect(c.kind).toBe('question');
+    expect(c.maybeAnswered ?? false).toBe(false);
+    expect(c.answeredIn).toBeUndefined();
+  });
+
+  test('a marked card ranks after an unmarked one of the same weight, however old', () => {
+    const p = parentRow();
+    const c = childRow(p, { prompt: typed(10) });
+    // Equal weight: each blocks one session and two work items.
+    const fresh2 = asking('alpha', 'Which colour?', 2, { name: 'fresh', items: [{ ref: 'ado:8003', title: 'Colour' }, { ref: 'ado:8004', title: 'Shade' }] });
+    const eq = now({ rows: [p, c, fresh2], projects }).answerNow;
+    expect(eq.map((x) => x.sessionName)).toEqual(['fresh', 'parent-orch']);
+  });
+
+  test('Tell it: the fixed message names the session, what the owner typed and its last reply; one line under the gated prompt\'s cap', () => {
+    const p = parentRow();
+    const c = childRow(p, { prompt: typed(10, 'Use the release branch, as option 1') });
+    const card = parentCard([p, c]);
+    const text = N.tellText(card, { said: 'Use the release branch, as option 1', reply: 'Done: the PR now targets the release branch.' });
+    expect(text).toContain('[Mission Control]');
+    expect(text).toContain('may have answered');
+    expect(text).toContain('WI 8001 audit port');
+    expect(text).toContain('Use the release branch, as option 1');
+    expect(text).toContain('the PR now targets the release branch');
+    const body = N.tellBody(card, { said: 'Use the release branch, as option 1', reply: 'Done.' });
+    expect(body).toMatchObject({ tag: 'supervisor', expectWaitAt: WAIT_AT });
+    expect(promptOf(body).error).toBeUndefined();
+    // No reply readable: the message still goes, without it.
+    expect(N.tellText(card, { said: 'Option 1', reply: null })).not.toMatch(/last reply/i);
+  });
+
+  test('Tell it stays inside 511 bytes whatever the names and words hold, with no control character', () => {
+    const p = parentRow();
+    const c = childRow(p, { prompt: typed(10), name: `${'\u{1F600}'.repeat(80)}\nname` });
+    const card = parentCard([p, c]);
+    const long = `${'\u{1F4A5}'.repeat(300)}\u001b[31m "quoted"\r\nnext`;
+    const body = N.tellBody(card, { said: long, reply: long });
+    const r = promptOf(body);
+    expect(r.error).toBeUndefined();
+    expect(Buffer.byteLength(r.prompt, 'utf8')).toBeLessThanOrEqual(PROMPT_BYTES_MAX);
+    expect(body.text).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    // No lone surrogate: a cut never splits a pair.
+    expect(Buffer.from(body.text, 'utf8').toString('utf8')).toBe(body.text);
+  });
+
+  test('a session created AFTER the wait was reported (a launch or hand-off prompt is no answer) does not count; one that existed before does', () => {
+    const p = parentRow();
+    // An orchestrator's launch line, or a successor's `continue`, reaches a NEW session after the wait.
+    const born = parentCard([p, childRow(p, { prompt: typed(10), createdAt: WAIT_AT + 5 * MIN })]);
+    expect(born.answeredIn).toBeUndefined();
+    expect(born.maybeAnswered ?? false).toBe(false);
+    expect(parentCard([p, childRow(p, { prompt: typed(10), createdAt: WAIT_AT - MIN })]).answeredIn).toBeDefined();
+    // A creation time that is not known fails closed.
+    const unknown = childRow(p, { prompt: typed(10) });
+    unknown.spawn.createdAt = null;
+    expect(parentCard([p, unknown]).answeredIn).toBeUndefined();
+  });
+
+  test('Answer now and the subject screen mark the same wait the same way: the pool is the item the WAIT names, never the screen\'s subject', () => {
+    const b = row('beta', { name: 'b', items: [ITEM], prompt: typed(5) });
+    const screens = (rows) => {
+      const nodes = M.sessionNodes({ rows, closed: [], now: NOW });
+      const view = M.buildView({ nodes, metaByKey: {}, projects, now: NOW, platform: 'win32' });
+      return { card: parentCard(rows), on: (key) => view.subjects.find((s) => s.key === key).needsYou };
+    };
+    // Two items and a wait that names none: its descendants only, on every screen.
+    const bare = parentRow({ items: [ITEM, OTHER], wait: { on: 'you', what: 'which colour?', at: WAIT_AT } });
+    const s1 = screens([bare, b]);
+    expect(s1.card.answeredIn).toBeUndefined();
+    expect(s1.on('ado:8001').answeredIn).toBeUndefined();
+    expect(s1.on('ado:8002').answeredIn).toBeUndefined();
+    // The wait names ado:8001: b is on it, so the card is marked - on Answer now and under BOTH subjects.
+    const named = parentRow({ items: [ITEM, OTHER] });
+    const s2 = screens([named, b]);
+    expect(s2.card.answeredIn).toMatchObject({ sessionId: b.id });
+    expect(s2.on('ado:8001').answeredIn).toMatchObject({ sessionId: b.id });
+    expect(s2.on('ado:8002').answeredIn).toMatchObject({ sessionId: b.id });
+    // A wait that names nothing, from a session holding ONE real item: that item is the pool, on both.
+    const one = parentRow({ items: [ITEM], wait: { on: 'you', what: 'which colour?', at: WAIT_AT } });
+    const s3 = screens([one, b]);
+    expect(s3.card.answeredIn).toMatchObject({ sessionId: b.id });
+    expect(s3.on('ado:8001').answeredIn).toMatchObject({ sessionId: b.id });
+  });
+
+  test('the supervisor dispatcher is never marked, and a supervisor session is never the answer', () => {
+    const sup = { ...parentRow({ name: 'dispatcher' }), role: 'supervisor' };
+    const kid = childRow(sup, { prompt: typed(10) });
+    const dispatcher = now({ rows: [sup, kid], projects }).answerNow.find((c) => c.sessionName === 'dispatcher');
+    expect(dispatcher).toBeDefined();
+    expect(dispatcher.answeredIn).toBeUndefined();
+    expect(N.tellPlan(dispatcher)).toMatchObject({ status: 409 });
+    const p = parentRow();
+    const other = { ...row('beta', { name: 'disp2', items: [ITEM], prompt: typed(5) }), role: 'supervisor' };
+    expect(parentCard([p, other]).answeredIn).toBeUndefined();
+    // A closed session's record carries no prompt, so it never answers either.
+    const gone = M.sessionNodes({ rows: [], closed: [{ id: 'dead-1', name: 'gone', server: 'beta', items: [ITEM], closedAt: NOW - MIN }], now: NOW });
+    expect(gone.every((x) => x.promptAt === null)).toBe(true);
+  });
+
+  test('zero-width and bidirectional controls in another agent\'s words never reach the line', () => {
+    const p = parentRow();
+    const card = parentCard([p, childRow(p, { prompt: typed(10) })]);
+    const evil = 'ab' + String.fromCodePoint(0x202e) + 'cd' + String.fromCodePoint(0x200b) + 'ef' + String.fromCodePoint(0xfeff) + String.fromCodePoint(0x2066) + 'g' + String.fromCodePoint(0xad);
+    const text = N.tellText(card, { said: evil, reply: evil });
+    expect(text).toContain('abcdefg');
+    for (const cp of [0x202e, 0x200b, 0xfeff, 0x2066, 0xad]) expect(text.includes(String.fromCodePoint(cp))).toBe(false);
+  });
+
+  test('tellPlan: only a card still marked is told; a card that is gone is a 404, an unmarked one a 409', () => {
+    const p = parentRow();
+    const card = parentCard([p, childRow(p, { prompt: typed(10) })]);
+    expect(N.tellPlan(card)).toEqual({ send: true });
+    expect(N.tellPlan(undefined)).toMatchObject({ status: 404 });
+    const plain = parentCard([p, childRow(p)]);
+    expect(N.tellPlan(plain)).toMatchObject({ status: 409 });
+    expect(N.tellInput({ cardId: 'a|b|c' })).toEqual({ cardId: 'a|b|c' });
+    expect(N.tellInput({}).error).toContain('cardId');
+    expect(N.tellInput(null).error).toContain('JSON object');
+  });
+
+  test('the answer shape: delivered, refused with the reason in words, or maybe landed', () => {
+    expect(N.tellAnswer({ delivered: true })).toEqual({ delivered: true });
+    expect(N.tellAnswer({ why: 'draft' })).toMatchObject({ delivered: false, refused: 'draft', reason: expect.stringContaining('unsent text') });
+    expect(N.tellAnswer({ uncertain: true })).toMatchObject({ delivered: false, uncertain: true });
   });
 });

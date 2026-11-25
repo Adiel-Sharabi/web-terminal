@@ -274,6 +274,17 @@ class McFeed extends ChangeNotifier {
     return 'Done - the session was told to carry on';
   }
 
+  /// #547: [card]'s session is told the person answered its wait in another session. Returns what
+  /// to tell the person; the card goes once the session has started on it.
+  Future<String> tellAnswered(McCard card) async {
+    final r = await _authority().mcTell(card.id);
+    unawaited(refresh());
+    final why = r.refused;
+    if (why != null) return 'Not told yet: $why. Press Tell it again when it can be told';
+    if (r.uncertain) return 'The message may have reached the session';
+    return 'The session was told it was answered in "${card.answeredIn?.name ?? 'another session'}"';
+  }
+
   /// Hides [card] for [hours].
   Future<String> later(McCard card, int hours) async {
     await _authority().mcLater(card.id, hours);

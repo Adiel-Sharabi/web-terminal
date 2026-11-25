@@ -266,11 +266,15 @@ void main() {
     testWidgets('a tap on the card shows the context and every option with its consequence; a second tap folds it', (tester) async {
       await pump(tester, _askJson());
       expect(key('mc-card-detail'), findsNothing);
-      expect(find.text('The migration runs tonight.'), findsNothing, reason: 'folded: the face stays short');
+      // #548: folded, the face carries the first line of the context (once); the options and the rest wait for the tap.
+      expect(find.text('The migration runs tonight.'), findsOneWidget);
+      expect(key('mc-card-context-line'), findsOneWidget);
+      expect(find.text('one file, no server'), findsNothing, reason: 'folded: the face stays short');
       await tester.tap(key('mc-card-heading'));
       await tester.pump();
       expect(key('mc-card-detail'), findsOneWidget);
-      expect(find.text('The migration runs tonight.'), findsOneWidget);
+      expect(find.text('The migration runs tonight.'), findsOneWidget, reason: 'opened: the whole context, not also the face line');
+      expect(key('mc-card-context-line'), findsNothing);
       expect(find.text('one file, no server'), findsOneWidget);
       expect(find.text('a server to run'), findsOneWidget);
       expect(key('mc-card-opt-star-0'), findsOneWidget, reason: 'the recommended one is marked');

@@ -317,6 +317,7 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                           : () => widget.onOpenSession(s.needsYou!.sessionId!),
                       onLater: (h) => mcRun(context, () => widget.feed.later(s.needsYou!, h)),
                       onTodo: () => mcRun(context, () => widget.feed.addTodo(s.needsYou!)),
+                      onTell: s.needsYou!.answeredIn == null ? null : () => mcRun(context, () => widget.feed.tellAnswered(s.needsYou!)),
                     ),
                     const SizedBox(height: 16),
                   ],
