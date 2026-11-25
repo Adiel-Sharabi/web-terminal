@@ -815,6 +815,16 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   question, single choice, no preview, 2+ options) lists its options, a tap answering with the keys
   the answer panel builds after the same Undo; anything else shows no options and **Answer** opens
   the sheet.
+
+  **Answer now holds still (#550, companion):** a card already on screen never moves because
+  another card arrived. New cards wait behind an "N new" pill at the top of Answer now and join when
+  you tap it, pull to refresh, or come back to Mission Control (at once, when nothing is shown);
+  a card the server drops goes, and the scroll stays anchored on the card you have open. An answered
+  card folds into a slim "Answered: <choice>" row at once (not after the next poll), wherever the
+  answer was typed (the card, the answer sheet, the ask dialog); the row fades out, and Now is
+  re-read every 2 seconds for 24 seconds after an answer; a card the server still lists after
+  20 seconds comes back as "not taken - answer again". The Mission Control server is unchanged:
+  from the send to its list the card took about 2 s, the rest was the Undo window and the 10 s poll.
   **Which item a card is about (#541):** a wait or an ask may name its work item (`"ref"`, one of the
   session's own items; a wrong one is refused with the list). A card shows that item's title; with no
   `ref` it takes a session's one bound item before it reports, the one item reported blocked (a wait)

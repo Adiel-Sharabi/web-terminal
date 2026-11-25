@@ -16,6 +16,16 @@ const Duration kMcUndoWindow = Duration(seconds: 5);
 /// when the session takes the reply, so a card still here this long after was not taken.
 const Duration kMcSentGrace = Duration(seconds: 20);
 
+/// #550 - once an answer went out, the card collapses at once into a slim `Answered: <choice>`
+/// row; the row stays this long, then fades out over [kMcAnsweredFade] and leaves no space. The
+/// card is not dropped meanwhile: if the server still lists it after [kMcSentGrace] it comes back
+/// as "not taken".
+const Duration kMcAnsweredShow = Duration(seconds: 3);
+const Duration kMcAnsweredFade = Duration(milliseconds: 500);
+
+/// #550 - how long the card takes to fold into its answered row (and the row to leave).
+const Duration kMcCollapse = Duration(milliseconds: 200);
+
 /// Sends [text] as the reply to [card]; true when it went out (a refusal is said by the sender).
 typedef McReply = Future<bool> Function(McCard card, String text);
 
