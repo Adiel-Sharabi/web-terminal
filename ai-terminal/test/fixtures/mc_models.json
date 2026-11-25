@@ -1,0 +1,43 @@
+{
+  "kinds": [
+    {
+      "id": "fix",
+      "label": "Routine fix or small feature",
+      "model": "sonnet"
+    },
+    {
+      "id": "run",
+      "label": "Watch, deploy or merge run",
+      "model": "sonnet"
+    },
+    {
+      "id": "lookup",
+      "label": "Lookup, status check or build",
+      "model": "haiku"
+    },
+    {
+      "id": "design",
+      "label": "Design, ambiguous or security work",
+      "model": null
+    }
+  ],
+  "models": [
+    {
+      "id": "default",
+      "label": "Default model"
+    },
+    {
+      "id": "sonnet",
+      "label": "Sonnet"
+    },
+    {
+      "id": "haiku",
+      "label": "Haiku"
+    }
+  ],
+  "defaults": {
+    "subjects": "fix",
+    "hunt": "design"
+  },
+  "defaultModel": "default"
+}

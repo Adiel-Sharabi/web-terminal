@@ -8,6 +8,7 @@
       "serverUrl": "http://alpha.test:7681",
       "sessionId": "s-1",
       "sessionName": "Fix the login loop",
+      "model": "sonnet",
       "project": "web-terminal",
       "subjectKey": "acme/widgets#41",
       "ref": "#41",

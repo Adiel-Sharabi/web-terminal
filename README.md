@@ -819,7 +819,12 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   least-loaded healthy one is suggested by `GET /api/mc/machines`). `POST /api/mc/start` creates the
   session in the project's folder with a name and a brief for its agent, and binds it to the project
   and work items at birth, so it shows under them before its first report; sessions it starts
-  inherit the binding. Config `mc.startCommand` sets the launch command.
+  inherit the binding. Config `mc.startCommand` sets the launch command. **Model per task (#533):** the
+  sheet also asks for the kind of work (routine fix, watch/deploy/merge run, lookup, design) and shows the
+  model that kind suggests - Sonnet, Haiku, or the default model for design-heavy work - which the person
+  may override; the session starts with `--model` and its brief says which model and why
+  (`GET /api/mc/models`). A session's model shows as a small chip on the sessions list and on Mission
+  Control's cards and session rows.
 - **Lines of work (#523):** a project runs several lines of work side by side (a bug hunt, health
   checks, a feature, a release cut), and Mission Control shows each line apart, at the top of Now
   and in the Lines tab, with its stage bar, what needs you, its sessions and machines; the project is

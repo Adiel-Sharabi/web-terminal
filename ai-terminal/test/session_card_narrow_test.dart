@@ -80,6 +80,9 @@ void main() {
           notifyLevel: 'important',
           server: _home,
           metrics: const SessionMetrics(ctx: 85, compactions: 16), // #393: the widest count seen
+          // #533: the agent chip and the widest model id a launch command names, beside them.
+          agent: 'claude',
+          model: 'claude-sonnet-5-5',
         );
         await tester.pumpWidget(MaterialApp(
           theme: AppTheme.dark,

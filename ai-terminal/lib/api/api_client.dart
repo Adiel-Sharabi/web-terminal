@@ -551,8 +551,15 @@ class ApiClient {
   /// The machines a session can be started on, the suggested one named (`GET /api/mc/machines`, #512).
   Future<McMachines> mcMachines() async => McMachines.fromJson(await _mcGet('/api/mc/machines'));
 
+  /// The kinds of work and the models Start work offers, each kind's suggestion included
+  /// (`GET /api/mc/models`, #533). An authority older than that answers 404 (an [ApiException]);
+  /// null when the reply cannot draw a picker.
+  Future<McStartModels?> mcModels() async => McStartModels.fromJson(await _mcGet('/api/mc/models'));
+
   /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]
   /// (`POST /api/mc/start`, #512). A refusal is an [ApiException] with the server's reason.
+  /// [kind] and [model] (#533) are sent only by a caller that asked [mcModels] first: the server
+  /// puts `--model` into the command it starts and names the choice in the session's brief.
   Future<McStartResult> mcStart({
     required String project,
     List<String> subjects = const [],
@@ -562,6 +569,8 @@ class ApiClient {
     String? brief,
     String? line,
     String? lineName,
+    String? kind,
+    String? model,
   }) async {
     final r = McStartResult.fromJson(await _mcPost('/api/mc/start', {
       'project': project,
@@ -572,6 +581,8 @@ class ApiClient {
       'brief': ?brief,
       'line': ?line,
       'lineName': ?lineName,
+      'kind': ?kind,
+      'model': ?model,
       // The server may wait on the tracker (1.5 s) and on a peer's create (15 s): the app
       // must not give up first and invite a second start of the same session.
     }, timeout: kMcStartTimeout));

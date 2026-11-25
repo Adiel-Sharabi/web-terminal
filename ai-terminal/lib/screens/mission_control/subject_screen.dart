@@ -611,6 +611,7 @@ class _SessionRow extends StatelessWidget {
                     style: theme.textTheme.bodyMedium?.copyWith(
                         fontWeight: FontWeight.w600, color: s.closed ? AppColors.onSurfaceVariant : null)),
                 if (s.server != null) McMachineChip(s.server!),
+                if (s.model != null) McTag(s.model!, key: ValueKey('mc-session-model-${s.id}'), muted: true),
                 if (s.closed)
                   McTag(
                       s.closedAt == null

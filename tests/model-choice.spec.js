@@ -144,6 +144,13 @@ test.describe('#533 the session it starts', () => {
 });
 
 test.describe('#533 one owner', () => {
+  test('the companion\'s test fixture is exactly what GET /api/mc/models serves', () => {
+    // The Dart tests draw the picker from this file: a server change that leaves it stale would let
+    // them pass against a wire the server no longer speaks.
+    const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'ai-terminal', 'test', 'fixtures', 'mc_models.json'), 'utf8'));
+    expect(fixture).toEqual(C.catalogue());
+  });
+
   test('no second table of kinds in the server or the libs', () => {
     const root = path.join(__dirname, '..');
     const files = ['server.js', 'pty-worker.js', 'monitor.js', ...fs.readdirSync(path.join(root, 'lib')).filter((f) => f.endsWith('.js')).map((f) => `lib/${f}`)];

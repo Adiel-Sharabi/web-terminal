@@ -26,6 +26,13 @@ void main() {
       expect(s.shortId, 'abc12345');
     });
 
+    test('#533 parses the model the launch command names; absent, empty or not a string is null', () {
+      expect(Session.fromJson(_server, {'id': 'x', 'model': 'sonnet'}).model, 'sonnet');
+      expect(Session.fromJson(_server, {'id': 'x'}).model, isNull);
+      expect(Session.fromJson(_server, {'id': 'x', 'model': ''}).model, isNull);
+      expect(Session.fromJson(_server, {'id': 'x', 'model': 7}).model, isNull);
+    });
+
     test('parses autoCommand (server sends it per session)', () {
       final s = Session.fromJson(_server, {
         'id': 'x',
@@ -771,9 +778,11 @@ void main() {
         parentId: 'parent-7',
         replaces: const ['old-1'],
         role: 'supervisor',
+        model: 'haiku',
       );
 
       final moved = original.withFavoriteRank(999);
+      expect(moved.model, 'haiku', reason: '#533: a dropped model blanks the chip on the session card until the next poll');
       expect(moved.role, 'supervisor', reason: '#475: a dropped role puts the dispatcher back in the session list');
 
       expect(moved.favoriteRank, 999);

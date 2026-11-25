@@ -21,6 +21,7 @@ Session _session({
   String id = 'abc12345',
   SessionMetrics? metrics,
   String? agent,
+  String? model,
   List<String> backgroundTasks = const <String>[],
 }) => Session(
   id: id,
@@ -34,6 +35,7 @@ Session _session({
   autoCommand: '',
   metrics: metrics,
   agent: agent,
+  model: model,
   backgroundTasks: backgroundTasks,
 );
 
@@ -308,6 +310,21 @@ void main() {
     await tester.pumpWidget(_wrap(SessionCard(session: session)));
 
     expect(find.text('OpenAI Codex CLI'), findsOneWidget);
+  });
+
+  testWidgets('#533 model chip names the model the launch command runs; none for the default model', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      _wrap(SessionCard(session: _session(status: 'idle', agent: 'claude', model: 'sonnet'))),
+    );
+    expect(find.byKey(const ValueKey('session-model-chip')), findsOneWidget);
+    expect(find.text('sonnet'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _wrap(SessionCard(session: _session(status: 'idle', agent: 'claude'))),
+    );
+    expect(find.byKey(const ValueKey('session-model-chip')), findsNothing);
   });
 
   testWidgets('agent chip is hidden for a plain shell (agent == null)', (

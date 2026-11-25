@@ -122,6 +122,9 @@ void main() {
       expect(tester.getTopLeft(first).dy, lessThan(tester.getTopLeft(second).dy), reason: "the server's order");
       Finder inFirst(Finder f) => find.descendant(of: first, matching: f);
       expect(inFirst(find.text('Web Terminal')), findsOneWidget);
+      // #533: the session line names the model the session's command runs; a card with none says nothing.
+      expect(inFirst(find.text('Fix the login loop · alpha · sonnet')), findsOneWidget);
+      expect(find.descendant(of: second, matching: find.text('Tidy the readme · beta')), findsOneWidget);
       expect(inFirst(find.text('#41  Login loops after a token refresh')), findsOneWidget);
       expect(inFirst(find.text('blocks 3 sessions - waiting: Child: write the test, Child: check the docs')), findsOneWidget);
       expect(inFirst(find.text('42 min')), findsOneWidget);
@@ -243,6 +246,7 @@ void main() {
       expect(find.byKey(const ValueKey('mc-card-alpha|s-3|action:1')), findsNothing);
       Finder inCard(Finder f) => find.descendant(of: card, matching: f);
       expect(inCard(find.text('try on-duty on 0.2.51')), findsOneWidget);
+      expect(inCard(find.text('TacticalMap release · alpha')), findsOneWidget, reason: 'no model on the wire: none on the line');
       expect(inCard(find.text('phone')), findsOneWidget);
       expect(inCard(find.text('Install 0.2.51')), findsOneWidget);
       expect(inCard(find.text('3.')), findsOneWidget);

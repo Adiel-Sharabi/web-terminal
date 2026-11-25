@@ -41,7 +41,7 @@
     "sessions": [
       {"server": "alpha", "serverUrl": "http://alpha.test:7681", "id": "s-1", "name": "Orchestrator", "parentId": null, "status": "working", "closed": false,
        "lastReport": {"state": "in-progress", "stage": "pr-open", "note": "PR up, waiting on the choice", "at": 1767224000000}},
-      {"server": "alpha", "serverUrl": "http://alpha.test:7681", "id": "s-2", "name": "Repro #41", "parentId": "s-1", "status": "idle", "closed": false,
+      {"server": "alpha", "serverUrl": "http://alpha.test:7681", "id": "s-2", "name": "Repro #41", "model": "haiku", "parentId": "s-1", "status": "idle", "closed": false,
        "lastReport": {"state": "done", "stage": "reproduced", "note": "repro script attached"}},
       {"server": "beta", "serverUrl": "http://beta.test:7681", "id": "s-3", "name": "Fix #41", "parentId": "s-1", "status": "working", "closed": false,
        "wait": {"on": "you", "what": "Which fix should ship?"}},

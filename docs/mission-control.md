@@ -178,6 +178,7 @@ Subject = { key, ref, url, title,          // title: meta.title, else the newest
   runId: string|null, updatedAt,
   line: Line.ref }                         // #523: {id, name, project, kind, source} - see Lines of work
 SessionRef = { server, serverUrl, id, name, parentId, status, closed: bool, closedAt,
+  model: string|null,                      // #533: the model its launch command names (`--model`); null = the default model, and for a closed record
   bound: bool,                             // #512: on this subject only through its Start work binding (no report of its own yet)
   lastReport: { state, stage, note, headline, at } , wait: {on, what}|null }
 Run = { id, server, sessionId, name, startedAt, status, subjects: [key], children: [{server, id, name, status}] }
@@ -220,6 +221,7 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
   askId, replyPrefix, maybeAnswered,  // an `ask` (#526): its short name, what an answer typed from the card begins with, may-be-answered
   supervisor: bool,              // the card is the supervisor dispatcher's own (#532); a to-do on it parks nothing
   server, serverUrl, sessionId, sessionName, project, subjectKey, ref, title,
+  model: string|null,            // #533: the model the session's launch command names; null = the default model
   what,                          // the reason's text / wait.what
   why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
                                  // text e.g. "blocks 3 sessions and 2 work items"
@@ -493,7 +495,7 @@ lowest CPU, then list order (this server first); null when none is ok. The hold 
 `GET /api/maintenance/status` (3 s); one that cannot be read is listed, never suggested.
 
 `POST /api/mc/start {project, subjects: [ref], hunt: bool, server, name?, brief?}` ->
-`{server, serverUrl, sessionId, name, agent, agentReady, project, subjects: [key], hunt, generatedAt}`.
+`{server, serverUrl, sessionId, name, agent, agentReady, project, subjects: [key], hunt, model, kind, generatedAt}`.
 `project` = a configured project id; `subjects` = up to 10 refs (a bare `#N` takes the project's
 first repo; one it cannot qualify is refused); `hunt` = a bug hunt, which needs no subject (without
 it, at least one); `server` = a machine name from `/api/mc/machines` (this server, or a peer of its
@@ -529,6 +531,32 @@ until the session reports items of its own.
 `configured`), or `lineName` = a new line by name (not both; the rules of `POST /api/mc/lines/move`).
 The binding keeps it as `line: {id?, name}`, the answer echoes it as `line` (null when none), and the
 session and its children are on that line until the session reports a `line` of its own.
+
+#533, the model per task (`lib/model-choice.js` owns the kinds and what each suggests; `lib/model-flag.js`
+places the flag). The body may also carry `kind` and `model`:
+`GET /api/mc/models` -> `{kinds: [{id, label, model}], models: [{id, label}], defaults: {subjects, hunt}, defaultModel, generatedAt}`.
+The kinds, in the order a picker lists them: `fix` (routine fix or small feature -> `sonnet`), `run`
+(watch, deploy or merge run -> `sonnet`), `lookup` (lookup, status check or build -> `haiku`) and
+`design` (design-heavy, ambiguous or security work -> `model: null`, the default model, no flag).
+`defaults` = the kind a start begins on: work items `fix`, a bug hunt `design` (open-ended work stays
+on the stronger model). `models` = what the picker lists beside each kind's suggestion; `defaultModel`
+(`default`) is the id that means "no flag". The body's `model` wins over the kind's suggestion; `model:
+"default"` runs the command as it is. A body naming neither `kind` nor `model` starts the session as
+before the picker (no flag, no line in the brief), so an older companion is unchanged; an unknown kind
+or a model that is no model name is a 400 in words. The authority puts `--model <m>` into the finished
+launch command and adds one line to the brief, `Model: sonnet for a routine fix or small feature (the
+suggested model for this kind of work).` (it says when the person chose another model, and when the start
+command names its own); the line counts against the brief's room. A start command that cannot take the
+flag (it launches no `claude`) is refused with the reason, never started on another model. The answer's
+`model` = what the command names (null = the default model), `kind` = the kind asked for (or null).
+**Peers: no capability flag is needed.** The authority sends a peer only the finished `autoCommand`,
+never a `model` an older server would ignore, so a peer of any version starts with the flag. What a
+client needs to know is whether the AUTHORITY takes `kind` / `model`: the companion asks
+`GET /api/mc/models` first, an older authority answers 404 and the sheet draws no picker, so a choice is
+never sent to be dropped. Session rows (`GET /api/sessions`, the cluster rows), `SessionRef` and `Card`
+carry `model` = what the launch command names (`modelOf`); `/model` typed inside a session is not
+followed, and the live status line's model (`metrics.model`) is a different field. The companion's
+plain New session sheet and `app.html` are not changed.
 
 ## Lines of work (#523) - `lib/mc-lines.js`
 A project runs several lines of work side by side (a bug hunt, health checks, a feature, a release
