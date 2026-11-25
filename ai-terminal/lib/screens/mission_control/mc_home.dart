@@ -74,7 +74,12 @@ class MissionControlHome extends StatefulWidget {
     this.repository,
     this.sessionsBoardBuilder,
     this.analyst,
+    this.picks,
   });
+
+  /// Test seam: what sends an answer to a card's session.
+  @visibleForTesting
+  final McPickSender? picks;
 
   /// Switches the app to the current sessions home.
   final VoidCallback onShowSessionsHome;
@@ -126,7 +131,8 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   // writers the board and the inbox use); the follow-ups and suggestions never come here.
   late final NeedsYouActions _needs =
       NeedsYouActions(repository: _repo, client: _client, input: runWithSessionInput, say: _say);
-  late final McPickSender _picks = McPickSender(actions: _needs, sessions: () => _repo.current, currentAsk: _currentAsk);
+  late final McPickSender _picks =
+      widget.picks ?? McPickSender(actions: _needs, sessions: () => _repo.current, currentAsk: _currentAsk);
   bool _needsMade = false;
 
   /// #179 for a pick sent as a reply: a CR the agent swallowed is said, as on the board.
@@ -151,9 +157,14 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     _unconfirmed ??= _repo.sessions.listen(_needs.checkUnconfirmedReplies);
   }
 
-  Future<bool> _sendPick(McCard card, String text, McQuestionAsk? shown) {
+  /// #550 - an answer that went out folds its card at once and is followed by quick re-reads of Now
+  /// ([McFeed.answerWentOut]): the card leaves the server's list in a couple of seconds, well
+  /// before the next poll. Every way of answering passes here, wherever the answer was typed.
+  Future<bool> _sendPick(McCard card, String text, McQuestionAsk? shown) async {
     _writersUsed();
-    return _picks.send(card, text, shown: shown);
+    final ok = await _picks.send(card, text, shown: shown);
+    if (ok && mounted) _feed.answerWentOut(card, shown: text);
+    return ok;
   }
 
   /// #531 - what the answer sheet may do: read the question on screen, send the answer panel's
@@ -166,14 +177,10 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     answerQuestion: (card, shown, frames) async {
       _writersUsed();
       final ok = await _picks.answerQuestion(card, shown, frames);
-      if (ok) unawaited(_feed.refresh());
+      if (ok && mounted) _feed.answerWentOut(card);
       return ok;
     },
-    send: (card, text) async {
-      final ok = await _sendPick(card, text, null);
-      if (ok) unawaited(_feed.refresh());
-      return ok;
-    },
+    send: (card, text) => _sendPick(card, text, null),
     openSession: (card) {
       if (card.sessionId != null) _openSession(card.sessionId!);
     },
@@ -336,7 +343,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             key: const ValueKey('mc-refresh'),
             tooltip: 'Refresh',
             icon: const Icon(Icons.refresh),
-            onPressed: _feed.refresh,
+            onPressed: () => _feed.refresh(show: true),
           ),
         IconButton(
           key: const ValueKey('mc-to-sessions-home'),

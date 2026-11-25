@@ -16,6 +16,16 @@ const Duration kMcUndoWindow = Duration(seconds: 5);
 /// when the session takes the reply, so a card still here this long after was not taken.
 const Duration kMcSentGrace = Duration(seconds: 20);
 
+/// #550 - once an answer went out, the card collapses at once into a slim `Answered: <choice>`
+/// row; the row stays this long, then fades out over [kMcAnsweredFade] and leaves no space. The
+/// card is not dropped meanwhile: if the server still lists it after [kMcSentGrace] it comes back
+/// as "not taken".
+const Duration kMcAnsweredShow = Duration(seconds: 3);
+const Duration kMcAnsweredFade = Duration(milliseconds: 500);
+
+/// #550 - how long the card takes to fold into its answered row (and the row to leave).
+const Duration kMcCollapse = Duration(milliseconds: 200);
+
 /// Sends [text] as the reply to [card]; true when it went out (a refusal is said by the sender).
 typedef McReply = Future<bool> Function(McCard card, String text);
 
@@ -39,6 +49,18 @@ String? mcDecisionQuestionToShow(McCard c) {
   if (d == null) return null;
   final what = c.what;
   return what != null && mcSameQuestion(what, d.question) ? null : d.question;
+}
+
+/// #548 - the first line of a decision's context, for the card's face: what the question is about
+/// and why it matters, where the person does not have to open the card to see it. The whole text
+/// is in the opened card ([McCardDetail]). Null when the context says nothing.
+String? mcContextLine(String? context) {
+  if (context == null) return null;
+  for (final line in context.split(String.fromCharCode(10))) {
+    final t = line.trim();
+    if (t.isNotEmpty) return t;
+  }
+  return null;
 }
 
 /// The options on the card's face. With [onPick] a chip answers (an [ActionChip]); [enabled] off

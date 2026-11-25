@@ -129,7 +129,7 @@ void main() {
       expect(sent, isEmpty, reason: 'nothing is sent inside the window');
       await _pastUndo(tester);
       expect(sent, [('Home|q|ask:1000.abcd1234', 'postgres')]);
-      expect(key('mc-card-sent'), findsOneWidget);
+      expect(key('mc-card-heading'), findsNothing, reason: 'the card folded away once the answer went out');
     });
 
     testWidgets('Undo sends nothing, and the chips answer again afterwards', (tester) async {
@@ -140,7 +140,7 @@ void main() {
       await tester.tap(find.text('Undo'));
       await _pastUndo(tester);
       expect(sent, isEmpty);
-      expect(key('mc-card-sent'), findsNothing);
+      expect(key('mc-card-heading'), findsOneWidget, reason: 'taken back: the card stays whole, it does not fold');
       await tester.tap(key('mc-card-option-1'));
       await tester.pump();
       await _pastUndo(tester);
@@ -164,7 +164,7 @@ void main() {
       await tester.pump();
       await _pastUndo(tester);
       expect(sent.map((s) => s.$2), ['sqlite']);
-      expect(key('mc-card-sent'), findsNothing, reason: 'it did not go, so it is not said to');
+      expect(key('mc-card-answered'), findsNothing, reason: 'it did not go, so it is not said to');
       await tester.tap(key('mc-card-option-1'));
       await tester.pump();
       await _pastUndo(tester);
@@ -203,7 +203,7 @@ void main() {
       await tester.tap(key('mc-card-undo'));
       await _pastUndo(tester);
       expect(sent, isEmpty);
-      expect(key('mc-card-sent'), findsNothing);
+      expect(key('mc-card-heading'), findsOneWidget, reason: 'taken back: the card stays whole, it does not fold');
     });
 
     testWidgets('a pick whose toast was hidden still goes when its own window has run out - once', (tester) async {
@@ -224,11 +224,12 @@ void main() {
       await tester.pump();
       await _pastUndo(tester);
       expect(sent.map((s) => s.$2), ['sqlite']);
-      expect(key('mc-card-sent'), findsOneWidget);
-      expect(tester.widget<ActionChip>(key('mc-card-option-1')).onPressed, isNull, reason: 'inside the grace the chips stay off');
+      expect(key('mc-card-answered'), findsOneWidget);
+      expect(key('mc-card-option-1'), findsNothing, reason: 'inside the grace the card is folded: nothing to press');
       await tester.pump(kMcSentGrace + const Duration(seconds: 1));
-      expect(key('mc-card-sent'), findsNothing);
-      expect(find.textContaining('still here'), findsOneWidget);
+      await tester.pumpAndSettle();
+      expect(key('mc-card-answered'), findsNothing);
+      expect(find.textContaining('Not taken'), findsOneWidget);
       expect(tester.widget<ActionChip>(key('mc-card-option-1')).onPressed, isNotNull, reason: 'the card answers again');
       await tester.tap(key('mc-card-option-1'));
       await tester.pump();
@@ -244,6 +245,7 @@ void main() {
       final earlierUndo = tester.widget<SnackBarAction>(find.byType(SnackBarAction)).onPressed;
       await _pastUndo(tester);
       await tester.pump(kMcSentGrace + const Duration(seconds: 1));
+      await tester.pumpAndSettle();
       await tester.tap(key('mc-card-option-1'));
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 500));
@@ -266,11 +268,15 @@ void main() {
     testWidgets('a tap on the card shows the context and every option with its consequence; a second tap folds it', (tester) async {
       await pump(tester, _askJson());
       expect(key('mc-card-detail'), findsNothing);
-      expect(find.text('The migration runs tonight.'), findsNothing, reason: 'folded: the face stays short');
+      // #548: folded, the face carries the first line of the context (once); the options and the rest wait for the tap.
+      expect(find.text('The migration runs tonight.'), findsOneWidget);
+      expect(key('mc-card-context-line'), findsOneWidget);
+      expect(find.text('one file, no server'), findsNothing, reason: 'folded: the face stays short');
       await tester.tap(key('mc-card-heading'));
       await tester.pump();
       expect(key('mc-card-detail'), findsOneWidget);
-      expect(find.text('The migration runs tonight.'), findsOneWidget);
+      expect(find.text('The migration runs tonight.'), findsOneWidget, reason: 'opened: the whole context, not also the face line');
+      expect(key('mc-card-context-line'), findsNothing);
       expect(find.text('one file, no server'), findsOneWidget);
       expect(find.text('a server to run'), findsOneWidget);
       expect(key('mc-card-opt-star-0'), findsOneWidget, reason: 'the recommended one is marked');
@@ -307,7 +313,7 @@ void main() {
     testWidgets('Send is off until there are words; the words go at once, without the Undo window', (tester) async {
       await pump(tester, _askJson());
       await tester.tap(key('mc-card-expand'));
-      await tester.pump();
+      await tester.pumpAndSettle();
       expect(tester.widget<FilledButton>(key('mc-card-reply-send')).onPressed, isNull);
       await tester.enterText(key('mc-card-reply-field'), '  neither - keep the file  ');
       await tester.pump();
@@ -327,7 +333,7 @@ void main() {
       await tester.tap(key('mc-card-reply-send'));
       await tester.pump();
       expect(tester.widget<TextField>(key('mc-card-reply-field')).controller?.text, 'keep the file');
-      expect(key('mc-card-sent'), findsNothing);
+      expect(key('mc-card-answered'), findsNothing);
     });
 
     testWidgets('with no reply path it still explains itself, and offers no box', (tester) async {

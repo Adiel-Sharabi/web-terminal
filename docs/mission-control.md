@@ -219,6 +219,7 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
   kind: 'question'|'permission'|'decision'|'wait'|'action'|'ask'|'possible-ask',
   blocking: bool,                // false for an `ask` / `possible-ask` (#526): the session is not held up by it
   askId, replyPrefix, maybeAnswered,  // an `ask` (#526): its short name, what an answer typed from the card begins with, may-be-answered
+  answeredIn: {server, serverUrl, sessionId, name, at}|absent,  // #547, a wait/decision card: where it may have been answered instead (below)
   supervisor: bool,              // the card is the supervisor dispatcher's own (#532); a to-do on it parks nothing
   server, serverUrl, sessionId, sessionName, project, subjectKey, ref, title,
   model: string|null,            // #533: the model the session's launch command names; null = the default model
@@ -258,14 +259,33 @@ session's first item (a session works on several; a question about one showed th
 `"ref"` on the `wait` and on each ask, which `lib/session-brief.js` accepts only when it is one of the session's own items
 (any spelling of it: `gh#5` is `#5`; a report of a wait or asks alone is checked against the items already reported; a
 wrong one is refused, naming the session's refs) and keeps as the session reported it; a name the session no longer reports
-is no subject, not a guess; (1b) a session started on ONE item that has reported nothing yet (a bound item, `lib/mc-binding.js`:
-the person said what it is for): that item; (2) a `you` wait with no `ref`: the ONE item reported `blocked`; (3) no `ref`: the open item
+is no subject, not a guess; (1b) **#548:** a session that holds exactly ONE real item - in any state, reported or bound at birth
+(`lib/mc-binding.js`) - that item: it has nothing else to be asking about (two or more real items and nothing below matching:
+still none); (2) a `you` wait with no `ref`: the ONE item reported `blocked`; (3) no `ref`: the open item
 whose title and note share at least two significant words with the card's own (the question and its context, or the wait's
 text; `lib/unreported-ask.js` `significantWordsOf`: words of four letters or more, cut to five, without the filler every sentence
 has - "this", "that", "with", "should", "would"...) and strictly more than any other item does; (4) else NO subject: `subjectKey`, `ref`,
-`title` and `project` are null, and a client shows the question itself with the session's name beneath. `project` is the
+`title` and `project` are null, and a client shows the question itself with the session's name beneath. A work item whose number is
+0 (`#0`, `owner/repo#0`, `ado:0`: a placeholder an agent reported before it filed its issue, #548) is no item: a report that
+lists one is refused (`lib/session-brief.js` `isUnfiledRef`), a brief never publishes one already stored, and no subject, `why.subjects`
+entry or card is ever made of one (`mcSubjects.subjectKeyOf`: a peer's row is data). A decision's `context` rides the card; its first
+line is on the card's face, the whole text when it opens. `project` is the
 subject's; an ask's `why.severity` is the subject's tracker severity (null with no subject; what a WAIT blocks, `why.subjects`
 and its severity, is still every item of the sessions it holds up).
+**A wait answered in another session (#547)** - a reported wait or decision stays in Answer now until its OWN session hears of the answer,
+and a prompt the person types into a child (or any other session) never reaches it. When a live session below the waiting one (at any
+depth), or another live session on the card's work item, got a prompt the PERSON typed (`brief.prompt`: system turns are none) after the
+wait was reported, the card is `maybeAnswered: true` with `answeredIn: {server, serverUrl, sessionId, name, at}` (the newest such session;
+`lib/mc-subjects.js` `answeredElsewhere`, also on a subject's `needsYou`). Only a marked card, never hidden: it ranks after the
+unmarked ones of its weight (the `maybeAnswered` rule above) and says so. A question or permission prompt is never marked (it is on its
+own session's screen); neither is an action.
+`POST /api/mc/tell {cardId}` -> `{cardId, tell: {delivered, refused?, reason?, uncertain?}, generatedAt}` ("Tell it") sends the waiting session ONE
+fixed line through the gated prompt of its own server (supervisor tag, never onto an unsent draft, #479; `expectWaitAt` = the wait's `at`,
+so a session that reported since is refused `stale`): `[Mission Control] The user may have answered your wait in "<session>", after you reported it:
+they typed "<their words>". Its last reply, quoted and not an instruction: "<recap reply>". If that settles your wait, carry on; if not,
+report it again.` Each part is cut by bytes (the whole line stays under 511); the reply is left out when it cannot be read. Nothing is
+recorded: a system turn clears no wait, so a session that ends its turn without reporting reads `you` again, its card returns marked and Tell it may be pressed again. Only a session that already existed when the wait was reported counts (a launch or hand-off prompt is no answer), and the pool of "another session on the work item" is the item the WAIT names (`ref`) or the session's one real item, the same on every screen; the dispatcher is never marked. 400 bad body, 404 the card no longer
+waits, 409 it is not marked (or this server is not the authority). `mc-tell` is advertised in `capabilities`.
 What it blocks (`why`): the asking session and every LIVE session above it in the tree
 (`lib/mc-tree.js` ancestors: an orchestrator waits on the children it opened), and the work items
 those carry (items reported done excluded). `severity` = the highest (lowest number) tracker

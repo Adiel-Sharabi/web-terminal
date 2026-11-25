@@ -244,6 +244,23 @@ class McCardQuestion {
   }
 }
 
+/// #547 - the session a reported wait may have been answered in: the person typed a prompt there
+/// after the wait was reported (a child, or another session on the same work item). The card
+/// says so and offers "Tell it"; the server decides who counts and sends the news.
+class McAnsweredIn {
+  final String? sessionId;
+  final String? name;
+  final String? server;
+  final DateTime? at;
+  const McAnsweredIn({this.sessionId, this.name, this.server, this.at});
+
+  static McAnsweredIn? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['sessionId']);
+    return id == null ? null : McAnsweredIn(sessionId: id, name: _str(m['name']), server: _str(m['server']), at: _at(m['at']));
+  }
+}
+
 /// One "Answer now" card: a session stuck on the person. The server ranks them; [rank]
 /// and the list order are its answer. An `action` card (#522) is the same shape, served in
 /// [McNow.actions] (My to-do) instead, with [action] and, after a refused Done, [done].
@@ -264,8 +281,12 @@ class McCard {
   /// decision it answers. The server words it; the app only prepends it.
   final String? replyPrefix;
 
-  /// An `ask` the person may have answered by typing into the session (the card is dimmed).
+  /// An `ask` the person may have answered by typing into the session (the card is dimmed), or
+  /// (#547) a reported wait they may have answered in ANOTHER session ([answeredIn]).
   final bool maybeAnswered;
+
+  /// #547: where the person may have answered this wait; null on every card but a marked wait.
+  final McAnsweredIn? answeredIn;
   final String? server;
   final String? serverUrl;
   final String? sessionId;
@@ -304,6 +325,7 @@ class McCard {
     this.askId,
     this.replyPrefix,
     this.maybeAnswered = false,
+    this.answeredIn,
     this.server,
     this.serverUrl,
     this.sessionId,
@@ -337,6 +359,7 @@ class McCard {
       // Kept as sent: its trailing space is part of the words the server chose (_str trims).
       replyPrefix: m['replyPrefix'] is String && (m['replyPrefix'] as String).trim().isNotEmpty ? m['replyPrefix'] as String : null,
       maybeAnswered: _bool(m['maybeAnswered']),
+      answeredIn: McAnsweredIn.fromJson(m['answeredIn']),
       server: _str(m['server']),
       serverUrl: _str(m['serverUrl']),
       sessionId: _str(m['sessionId']),
@@ -546,6 +569,9 @@ class McTodoResult {
 
   /// #522: `POST /api/mc/actions/done`'s answer: its `done` is the park answer's shape.
   static McTodoResult fromDone(dynamic json) => _of(_map(_map(json)['done']), null);
+
+  /// #547: `POST /api/mc/tell`'s answer: its `tell` is the park answer's shape too.
+  static McTodoResult fromTell(dynamic json) => _of(_map(_map(json)['tell']), null);
 
   static McTodoResult _of(Map<String, dynamic> parked, McTodo? todo) {
     final refused = parked['refused'];
