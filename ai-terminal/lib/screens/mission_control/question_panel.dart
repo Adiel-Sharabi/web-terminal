@@ -4,8 +4,10 @@
 //
 // Every word here comes from the server ([McQuestionDesk]); the panel decides nothing. Only
 // "Send as answer" on a suggestion reaches the waiting session, through [McPickSender] (the
-// existing answer paths), after the person confirms. The card's own options are answered
-// where they always were: "Answer" opens the questions inbox.
+// existing answer paths), after the person confirms. The card's own options are answered in
+// the answer sheet (#531): "Answer" opens it, in Mission Control. The box to ask the Analyst
+// about the whole question is always here; [McQuestionPanel.askFirst] opens it ready (the
+// card's "Ask about this").
 
 import 'package:flutter/material.dart';
 
@@ -14,41 +16,67 @@ import '../../api/mc_models.dart';
 import '../../services/mc_analyst.dart';
 import '../../services/mc_question_desk.dart';
 import '../../theme/app_theme.dart';
+import 'answer_sheet.dart' show McAnswerPort;
 
 /// What a question card needs to open its panel; placed by Mission Control's home above
 /// every screen that shows an [McCard] (Now, a subject). Absent: no panel is offered.
 class McQuestionScope extends InheritedWidget {
-  const McQuestionScope({super.key, required this.analyst, required this.onSend, required this.onAnswer, required super.child});
+  const McQuestionScope(
+      {super.key, required this.analyst, required this.onSend, required this.onAnswer, this.answerPort, required super.child});
 
   final McAnalyst analyst;
+
+  /// #541 - what a card may do to answer where it is: [McAnswerPort.send] answers an ask or a
+  /// decision (an option's text, or the person's words), [McAnswerPort.pendingQuestion] and
+  /// [McAnswerPort.answerQuestion] a simple AskUserQuestion. The same port as the answer sheet's.
+  /// Null: the cards only explain.
+  final McAnswerPort? answerPort;
 
   /// Sends the person's final pick as the card's answer ([shown]: the ask the panel showed, which
   /// must still be the one asked); true when it went out.
   final Future<bool> Function(McCard card, String text, McQuestionAsk? shown) onSend;
 
-  /// Opens the card's question where it is answered (the inbox).
+  /// Opens the card's answer sheet (#531), where it is answered.
   final void Function(McCard card) onAnswer;
 
   static McQuestionScope? maybeOf(BuildContext context) => context.dependOnInheritedWidgetOfExactType<McQuestionScope>();
 
-  /// Opens [card]'s panel as a page over the current one.
-  void open(BuildContext context, McCard card) {
+  /// Opens [card]'s panel as a page over the current one; [askFirst] opens it with the box
+  /// for a question about the whole card ready (#531's "Ask about this").
+  void open(BuildContext context, McCard card, {bool askFirst = false}) =>
+      openPanel(context, card: card, analyst: analyst, onSend: onSend, onAnswer: onAnswer, askFirst: askFirst);
+
+  /// The same page, for a caller that is not under a scope (the answer sheet's own route sits
+  /// above Mission Control's). A null [onAnswer] leaves "Answer" out of the panel: the person
+  /// is already answering.
+  static void openPanel(
+    BuildContext context, {
+    required McCard card,
+    required McAnalyst analyst,
+    required Future<bool> Function(McCard card, String text, McQuestionAsk? shown) onSend,
+    void Function(McCard card)? onAnswer,
+    bool askFirst = false,
+  }) {
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => McQuestionPanel(card: card, analyst: analyst, onSend: onSend, onAnswer: () => onAnswer(card)),
+      builder: (_) => McQuestionPanel(
+          card: card, analyst: analyst, onSend: onSend, onAnswer: onAnswer == null ? null : () => onAnswer(card), askFirst: askFirst),
     ));
   }
 
   @override
-  bool updateShouldNotify(McQuestionScope old) => old.analyst != analyst || old.onSend != onSend || old.onAnswer != onAnswer;
+  bool updateShouldNotify(McQuestionScope old) => old.analyst != analyst || old.onSend != onSend || old.onAnswer != onAnswer || old.answerPort != answerPort;
 }
 
 class McQuestionPanel extends StatefulWidget {
-  const McQuestionPanel({super.key, required this.card, required this.analyst, required this.onSend, this.onAnswer, this.desk});
+  const McQuestionPanel({super.key, required this.card, required this.analyst, required this.onSend, this.onAnswer, this.desk, this.askFirst = false});
 
   final McCard card;
   final McAnalyst analyst;
   final Future<bool> Function(McCard card, String text, McQuestionAsk? shown) onSend;
   final VoidCallback? onAnswer;
+
+  /// Opens with the box for a question about the whole card open and focused (#531).
+  final bool askFirst;
 
   /// Injectable for tests.
   final McQuestionDesk? desk;
@@ -69,6 +97,7 @@ class _McQuestionPanelState extends State<McQuestionPanel> {
   @override
   void initState() {
     super.initState();
+    if (widget.askFirst) _asking = null;
     _desk.show('ask');
   }
 
@@ -183,6 +212,10 @@ class _McQuestionPanelState extends State<McQuestionPanel> {
     if (ask == null) return const [];
     final options = ask.options;
     return [
+      // #531: a question about the whole card, always one tap away (answered by the Analyst;
+      // the session never sees it).
+      _followupBlock(null, 'Ask about this question'),
+      const SizedBox(height: 8),
       Row(children: [
         Expanded(child: Text('Options', style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w600))),
         if (options.length > 1)
@@ -193,10 +226,9 @@ class _McQuestionPanelState extends State<McQuestionPanel> {
             label: Text(_compare ? 'List' : 'Compare'),
           ),
       ]),
-      if (options.isEmpty) ...[
-        Text('No options: the session waits for your words.', style: theme.textTheme.bodySmall),
-        _followupBlock(null, 'Ask about this'),
-      ] else if (_compare)
+      if (options.isEmpty)
+        Text('No options: the session waits for your words.', style: theme.textTheme.bodySmall)
+      else if (_compare)
         _compareTable(options)
       else
         for (final o in options) _optionTile(o),

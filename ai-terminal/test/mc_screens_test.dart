@@ -15,6 +15,7 @@ import 'package:ai_terminal/screens/mission_control/machines_view.dart';
 import 'package:ai_terminal/screens/mission_control/mc_home.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/mission_control/question_panel.dart';
+import 'package:ai_terminal/screens/questions_inbox_screen.dart' show QuestionsInboxScreen;
 import 'package:ai_terminal/screens/settings_screen.dart';
 import 'package:ai_terminal/screens/work_board_screen.dart';
 import 'package:ai_terminal/services/launch_settings.dart';
@@ -412,6 +413,18 @@ void main() {
       await tester.pump();
       expect(find.textContaining('#508'), findsNothing, reason: 'the placeholder is gone: #508 fills the tab');
       expect(find.byKey(const ValueKey('mc-project-web-terminal')), findsOneWidget, reason: "the projects, as Now's answer has them (a server with no lines)");
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('#531 Answer opens the answer sheet inside Mission Control, never the questions inbox', (tester) async {
+      await pump(tester, const Size(1400, 1000));
+      await tester.tap(find.byKey(const ValueKey('mc-card-answer')).first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      expect(find.byKey(const ValueKey('mc-answer-sheet')), findsOneWidget);
+      expect(find.byType(QuestionsInboxScreen), findsNothing);
+      // The decision card's own options, to answer from here.
+      expect(find.byKey(const ValueKey('mc-answer-option-1')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 

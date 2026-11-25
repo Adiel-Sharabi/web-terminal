@@ -158,3 +158,149 @@ test.describe('#510 follow-ups and suggestions', () => {
     expect(mq.parseSuggestions('not json', [], [])).toBeNull();
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// #531 - a question card shows the question; the Analyst reads the session's last turns.
+// ---------------------------------------------------------------------------------------------
+const LEAD = "Federator is the piece that merges every server's answer into one view. ".repeat(30); // ~2.1k chars
+const turn = (role, text, minAgo, extra = {}) => ({ role, text, ts: new Date(NOW - minAgo * MIN).toISOString(), ...extra });
+const questionCard = { ...decisionCard, id: 'alpha|s1|question:55', kind: 'question', decision: null, what: 'answer a question' };
+const pending4 = { questions: [
+  { header: 'Scope', question: 'Should Federator also cover the closed strip?', multiSelect: false, options: [{ label: 'Yes' }, { label: 'No' }] },
+  { header: 'Cache', question: 'How long may a peer answer be reused?', multiSelect: false, options: [{ label: '3 s' }, { label: '30 s' }] },
+  { header: null, question: 'Which peers first?', multiSelect: true, options: [{ label: 'A' }, { label: 'B' }] },
+  { header: 'Name', question: 'x'.repeat(900), multiSelect: false, options: [{ label: 'a' }] },
+  { header: 'Fifth', question: 'never sent: AskUserQuestion holds four', options: [] },
+] };
+
+test.describe('#531 the card face carries the questions', () => {
+  test("a question card: each question's header and text, one line each, capped", () => {
+    const face = mq.faceOf(questionCard, pending4);
+    expect(face).toHaveLength(4);
+    expect(face[0]).toEqual({ header: 'Scope', text: 'Should Federator also cover the closed strip?' });
+    expect(face[2]).toEqual({ header: null, text: 'Which peers first?' });
+    expect(face[3].text.length).toBe(mq.FACE_TEXT_MAX);
+    expect(face[3].text.endsWith('…')).toBe(true);
+  });
+  test('control characters and line breaks never reach the face', () => {
+    const nl = String.fromCodePoint(10);
+    const esc = String.fromCodePoint(0x1b);
+    const face = mq.faceOf(questionCard, { questions: [{ header: `Pl${nl}an`, question: `Which${nl}${nl}parts ${esc}[2J now?` }] });
+    expect(face).toEqual([{ header: 'Pl an', text: 'Which parts [2J now?' }]);
+  });
+  test('no face for anything but a question read from the screen', () => {
+    expect(mq.faceOf(questionCard, null)).toBeNull(); // unreadable: the card says its text could not be read here
+    expect(mq.faceOf(questionCard, { questions: [] })).toBeNull();
+    expect(mq.faceOf(questionCard, { questions: [{ question: '   ' }] })).toBeNull();
+    expect(mq.faceOf(decisionCard, pending4)).toBeNull(); // a decision shows its own options
+    expect(mq.faceOf({ ...questionCard, kind: 'wait' }, pending4)).toBeNull();
+  });
+  test('the face cache: a read is kept, an unreadable one is retried sooner, gone cards are dropped', () => {
+    const c = mq.createFaceCache({ ttlMs: 30000, failMs: 5000, max: 3 });
+    expect(c.get('a', NOW)).toEqual({ known: false });
+    c.set('a', [{ header: null, text: 't' }], NOW);
+    c.set('b', null, NOW);
+    expect(c.get('a', NOW + 29000)).toEqual({ known: true, face: [{ header: null, text: 't' }] });
+    expect(c.get('a', NOW + 31000)).toEqual({ known: false });
+    expect(c.get('b', NOW + 4000)).toEqual({ known: true, face: null });
+    expect(c.get('b', NOW + 6000)).toEqual({ known: false });
+    c.set('a', [{ header: null, text: 't' }], NOW);
+    c.set('b', null, NOW);
+    c.prune(new Set(['a']));
+    expect(c.get('b', NOW)).toEqual({ known: false });
+    expect(c.get('a', NOW).known).toBe(true);
+    for (const k of ['k1', 'k2', 'k3', 'k4']) c.set(k, null, NOW);
+    expect(c.size()).toBeLessThanOrEqual(3);
+  });
+});
+
+test.describe("#531 the session's last turns", () => {
+  const turns = [
+    turn('user', 'earlier prompt about caching', 300),
+    turn('assistant', 'Reading the cache module.', 290, { toolUses: [{ name: 'Read' }] }),
+    turn('user', '<task-notification>a background job ended</task-notification>', 200, { userKind: 'system' }),
+    turn('assistant', '', 150, { toolUses: [{ name: 'Bash' }] }),
+    turn('user', 'what does Federator do here?', 60, { userKind: 'human' }),
+    turn('assistant', LEAD, 20),
+  ];
+  test("human prompts and the agent's prose, oldest first; tool-only and harness turns left out", () => {
+    const t = mq.lastTurns(turns, NOW);
+    expect(t.count).toBe(4);
+    const i = (s) => t.text.indexOf(s);
+    expect(i('earlier prompt about caching')).toBeGreaterThanOrEqual(0);
+    expect(i('earlier prompt about caching')).toBeLessThan(i('Reading the cache module.'));
+    expect(i('what does Federator do here?')).toBeLessThan(i('Federator is the piece'));
+    expect(t.text).not.toContain('task-notification');
+    expect(t.text).toContain('You (');
+    expect(t.text).toContain('The agent (');
+    expect(t.text).toContain('20 min ago');
+  });
+  test("the agent's long lead-up is kept far past the recap's 280 characters, up to the per-turn cap", () => {
+    const t = mq.lastTurns(turns, NOW);
+    expect(t.text.length).toBeGreaterThan(2000);
+    const long = mq.lastTurns([turn('assistant', 'z'.repeat(9000), 5)], NOW);
+    expect(long.text.length).toBeLessThan(mq.TURN_CAP + 200);
+    expect(long.text).toContain('…');
+  });
+  test('capped in all: the newest turns are kept and the cut is said', () => {
+    const many = [];
+    for (let k = 0; k < 40; k++) many.push(turn(k % 2 ? 'assistant' : 'user', `turn number ${k} ${'w'.repeat(1500)}`, 400 - k));
+    const t = mq.lastTurns(many, NOW);
+    expect(t.text.length).toBeLessThanOrEqual(mq.TURNS_CAP + 1200);
+    expect(t.text).toContain('turn number 39');
+    expect(t.text).not.toContain('turn number 0 ');
+    expect(t.omitted).toBe(true);
+    expect(t.count).toBeLessThanOrEqual(mq.TURNS_MAX);
+  });
+  test('control characters in a turn never reach the bundle; its line breaks stay', () => {
+    const cp = (n) => String.fromCodePoint(n);
+    const dirty = `line one${cp(0)}${cp(7)}${cp(0x0b)}${cp(0x1b)}[2J${cp(10)}line two`;
+    const t = mq.lastTurns([turn('assistant', dirty, 5), turn('user', `typed${cp(0)}words`, 4, { userKind: 'human' })], NOW);
+    expect(t.count).toBe(2);
+    const stray = [...t.text].filter((ch) => ch.codePointAt(0) < 32 && ch !== '\n');
+    expect(stray).toEqual([]);
+    expect(t.text).toContain('line one');
+    expect(t.text).toContain(`${cp(10)}line two`);
+    expect(t.text).toContain('typed words');
+  });
+  test('nothing readable: no turns, nothing invented', () => {
+    for (const bad of [null, undefined, [], 'x', [turn('assistant', '   ', 1)], [null, {}]]) {
+      const t = mq.lastTurns(bad, NOW);
+      expect(t).toMatchObject({ count: 0, text: '', omitted: false });
+    }
+  });
+  test("the Analyst bundle holds the last turns inside the fence, before the card's own block", () => {
+    const ask = mq.askOf(questionCard, pending4);
+    const base = an.buildBundle({ rows: [row], now: NOW });
+    const b = mq.withAskBlock(base, { card: questionCard, ask, now: NOW, turns });
+    const iTurns = b.text.indexOf('Federator is the piece');
+    const iAsk = b.text.indexOf('THE QUESTION WAITING FOR THE PERSON');
+    expect(iTurns).toBeGreaterThan(0);
+    expect(iAsk).toBeGreaterThan(iTurns);
+    // Its source is offered, and the card's block is still the LAST one (askId).
+    const src = b.sources.find((s) => s.label.endsWith('last turns'));
+    expect(src).toMatchObject({ kind: 'recap', sessionId: 's1', server: 'alpha' });
+    expect(b.askId).toBe(b.sources[b.sources.length - 1].id);
+    expect(b.text).toContain(`[${src.id}] THE SESSION'S LAST TURNS`);
+    const p = mq.followupPrompt({ bundle: b, input: { ok: true, option: null, question: 'What does Federator do?' }, scope: { kind: 'session', id: 's1' }, now: NOW, nonce: 'n9' });
+    const open = p.lastIndexOf('=== DATA n9 BEGIN ===');
+    const close = p.lastIndexOf('=== DATA n9 END ===');
+    expect(p.indexOf('Federator is the piece')).toBeGreaterThan(open);
+    expect(p.indexOf('Federator is the piece')).toBeLessThan(close);
+    // Without turns the bundle is what it was.
+    const none = mq.withAskBlock(base, { card: questionCard, ask, now: NOW });
+    expect(none.text).not.toContain('LAST TURNS');
+    expect(none.sources).toHaveLength(base.sources.length + 1);
+  });
+  test('the Everything level\'s "Last turns" is those same turns when they were read', () => {
+    const ask = mq.askOf(questionCard, pending4);
+    const recap = { prompt: { text: 'recap prompt', at: NOW }, reply: { text: 'short reply', at: NOW } };
+    const c = mq.buildContext({ card: questionCard, level: 'everything', ask, row, meta, recap, turns, now: NOW });
+    const sec = c.sections.find((s) => s.title === 'Last turns');
+    expect(sec.body).toContain('Federator is the piece');
+    expect(sec.body).not.toContain('short reply');
+    // No turns read: the recap says what it can, as before.
+    const old = mq.buildContext({ card: questionCard, level: 'everything', ask, row, meta, recap, now: NOW });
+    expect(old.sections.find((s) => s.title === 'Last turns').body).toContain('short reply');
+  });
+});

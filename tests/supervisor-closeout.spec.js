@@ -244,6 +244,97 @@ test.describe('#469 the gated close, re-checked by the session\'s own server (cl
   });
 });
 
+test.describe('#543 clean means the subject is finished in full; a shared PR keeps one owner open', () => {
+  const d = { on: 'done', what: 'x', at: T0 };
+  const ME = id(1);
+  /** Clean, naming [owner] as the session that owns the still-open shared PR #9. */
+  const shared = (at, owner) => ({ ...clean(at), pr: '#9', owner });
+  const owner = (n, over = {}) => ({ ...done(n), wait: { on: 'self', what: 'watching PR #9', at: T0 }, name: `owner${n}`, replaces: [], ...over });
+
+  test('answerOf: a shared PR needs both refs and goes with clean; naming yourself is not clean', () => {
+    expect(co.answerOf({ state: 'clean', pr: '#9', owner: id(2) }, d, ME)).toEqual({ answer: { state: 'clean', left: '', pr: '#9', owner: id(2) } });
+    expect(co.answerOf({ state: 'clean', pr: ' #9\n', owner: 'the\nwatcher' }, d, ME).answer).toMatchObject({ pr: '#9', owner: 'the watcher' });
+    // A PR the session owns, still open, is never clean: refused, nothing recorded.
+    expect(co.answerOf({ state: 'clean', pr: '#9', owner: ME }, d, ME).error).toMatch(/you own still open is not clean/);
+    expect(co.answerOf({ state: 'clean', pr: '#9' }, d, ME).error).toMatch(/needs both/);
+    expect(co.answerOf({ state: 'clean', owner: id(2) }, d, ME).error).toMatch(/needs both/);
+    expect(co.answerOf({ state: 'blocked', left: 'x', pr: '#9', owner: id(2) }, d, ME).error).toMatch(/go with clean/);
+    expect(co.answerOf({ state: 'clean', pr: 9, owner: id(2) }, d, ME).error).toMatch(/strings/);
+    // Without them, as before: no pr, no owner on the answer.
+    expect(co.answerOf({ state: 'clean' }, d, ME)).toEqual({ answer: { state: 'clean', left: '' } });
+  });
+
+  test('the record carries the shared PR and its owner, for a clean answer only', () => {
+    const r = co.applyAnswer(co.askedRecord(T0), { state: 'clean', left: '', pr: '#9', owner: id(2) }, T0 + MIN);
+    expect(co.recordOf(r)).toEqual({ askedAt: T0, state: 'clean', left: '', at: T0 + MIN, pr: '#9', owner: id(2) });
+    expect(co.recordOf({ ...r, state: 'blocked', left: 'x' })).toEqual({ askedAt: T0, state: 'blocked', left: 'x', at: T0 + MIN });
+    expect(co.recordOf({ ...r, owner: '' })).toEqual({ askedAt: T0, state: 'clean', left: '', at: T0 + MIN });
+    // The graph node keeps it (a peer's row is data: validated on the way).
+    const n = sup.nodeOf({ id: ME, status: 'idle', brief: { closeout: { ...r, pr: `#9\u2028${'x'.repeat(200)}` } } }, 'alpha');
+    expect(n.closeout.owner).toBe(id(2));
+    expect(n.closeout.pr.length).toBe(co.REF_MAX);
+  });
+
+  test('ready to close only while the named owner is a live session: by id, a replaces alias, or a unique name', () => {
+    const at = T0 + MIN;
+    const due = at + CFG.closeAfterMs;
+    const me = (o) => done(1, { closeout: shared(at, o) });
+    for (const [label, o, nodes] of [['id', id(2), [owner(2)]], ['alias', id(7), [owner(2, { replaces: [id(7)] })]], ['name', 'owner2', [owner(2)]]]) {
+      const p = plan([me(o), ...nodes], due);
+      expect(p.ready, label).toEqual([ME]);
+      expect(p.close.map((x) => x.id), label).toEqual([ME]);
+      expect(p.needs, label).toEqual([]);
+    }
+    // The owner is gone (a complete scan): the owner's, with what is open - never ready, never closed.
+    const gone = plan([me(id(2))], due);
+    expect(gone.ready).toEqual([]);
+    expect(gone.close).toEqual([]);
+    expect(gone.needs).toEqual([expect.objectContaining({ id: ME, why: 'owner-gone', key: `closeout|${ME}|${at}` })]);
+    expect(gone.needs[0].left).toMatch(/PR #9 is still open and its owner ".+" is not a running session/);
+    // A name two sessions carry names nobody.
+    expect(plan([me('owner2'), owner(2), owner(3, { name: 'owner2' })], due).needs.map((x) => x.why)).toEqual(['owner-gone']);
+    // A scan some server did not answer cannot say the owner is gone: held, asked of nobody.
+    const part = co.closeoutPlan({ graph: { nodes: [me(id(2))], complete: false }, asks: {}, now: due, cfg: CFG });
+    expect(part).toMatchObject({ ready: [], close: [], needs: [], why: { [ME]: 'owner-unknown' } });
+    // Named itself by its name (the id is refused at the answer): it owns the open PR.
+    const self = plan([done(1, { name: 'me', closeout: shared(at, 'me') })], due);
+    expect(self.ready).toEqual([]);
+    expect(self.needs).toEqual([expect.objectContaining({ id: ME, why: 'owns-pr' })]);
+    // #543 review: an owner that reported done watches nothing. Two sessions naming each other
+    // would otherwise both close and leave the PR with no owner; the owner that finished is
+    // asked to check it, and neither sharer is ready or closed.
+    const mutual = plan([me(id(2)), done(2, { closeout: shared(at, ME) })], due);
+    expect(mutual.ready).toEqual([]);
+    expect(mutual.close).toEqual([]);
+    expect(mutual.needs.map((x) => [x.id, x.why])).toEqual([[ME, 'owner-done'], [id(2), 'owner-done']]);
+    expect(plan([me(id(2)), owner(2, { wait: { on: 'done', what: 'merged', at: T0 } })], due).needs.map((x) => x.why)).toEqual(['owner-done']);
+    // The dispatcher is always live, and watches no PR: naming it is naming nobody.
+    expect(plan([me(id(2)), owner(2, { role: 'supervisor' })], due).needs.map((x) => x.why)).toEqual(['owner-gone']);
+    // The owner's own session (never closed) is not marked ready either while its owner is gone.
+    expect(plan([done(1, { by: 'human', closeout: shared(at, id(2)) })], due).ready).toEqual([]);
+  });
+
+  test('the dispatcher\'s close verb looks the owner up in the whole last scan', () => {
+    const at = T0 + MIN;
+    const due = at + CFG.closeAfterMs;
+    const n = done(1, { closeout: shared(at, id(2)) });
+    expect(co.dispatcherClose(n, { complete: true, now: due, cfg: CFG, peers: [n, owner(2)] }).close).toMatchObject({ id: ME, closeoutAt: at });
+    expect(co.dispatcherClose(n, { complete: true, now: due, cfg: CFG, peers: [n] }).close).toBeUndefined();
+    expect(co.dispatcherClose(n, { complete: true, now: due, cfg: CFG }).close).toBeUndefined();
+  });
+
+  test('stateOf: a clean close-out whose PR owner is gone is in Needs you, not Ready to close', () => {
+    const g = sup.buildGraph([{ name: 'alpha', ok: true, sessions: [
+      { id: ME, status: 'idle', clients: 0, spawn: { by: 'agent' }, brief: { wait: { on: 'done', what: 'x', at: T0 }, closeout: shared(T0 + MIN, id(2)) } },
+    ] }], T0);
+    const closeout = co.closeoutPlan({ graph: g, asks: {}, now: T0 + 2 * MIN, cfg: CFG });
+    const st = sup.stateOf({ graph: g, verdicts: {}, journal: [], cfg: sup.supervisorConfig(null), now: T0 + 2 * MIN, closeout });
+    expect(st.readyToClose).toEqual([]);
+    expect(st.needsYou).toEqual([ME]);
+    expect(st.sessions[0].closeoutState).toMatchObject({ needs: 'owner-gone' });
+  });
+});
+
 test.describe('#469 the close-out prompt, the template, and the journal state', () => {
   test('the prompt is built by the receiving server, names its own script once, and fits 512 bytes', () => {
     const cli = 'C:/dev/web-terminal/scripts/wt-closeout.js';
@@ -252,10 +343,12 @@ test.describe('#469 the close-out prompt, the template, and the journal state', 
     expect(p.expectWaitAt).toBe(T0);
     expect(p.prompt.startsWith('[web-terminal supervisor] Close-out: you reported done.')).toBe(true);
     expect(p.prompt.split(cli)).toHaveLength(2);
-    for (const word of ['uncommitted', 'untracked', 'unpushed branches', 'worktrees', 'processes and sessions you started', 'tracker', 'clean', 'blocked']) expect(p.prompt).toContain(word);
+    // #543: clean means the subject is finished in full - the prompt says what that is.
+    for (const word of ['Fix what you can', 'done in full', 'merged, not just pushed', 'every PR you opened completed', 'reviews answered',
+      'tracker item', 'worktree or process you started', 'Your PR still open: watch it', '--pr "<ref>" --owner <its owner>', 'clean', 'blocked']) expect(p.prompt).toContain(word);
     expect(Buffer.byteLength(p.prompt, 'utf8')).toBeLessThanOrEqual(safePrompt.PROMPT_BYTES_MAX);
-    // A path 70 bytes longer still fits (a machine whose checkout lives deeper).
-    expect(Buffer.byteLength(`[web-terminal supervisor] ${co.closeoutText(`D:/${'x'.repeat(70)}/scripts/wt-closeout.js`)}`, 'utf8')).toBeLessThanOrEqual(511);
+    // A checkout path 70 bytes longer than this one still fits (a machine whose checkout lives deeper).
+    expect(Buffer.byteLength(`[web-terminal supervisor] ${co.closeoutText(`C:/dev/web-terminal${'x'.repeat(70)}/scripts/wt-closeout.js`)}`, 'utf8')).toBeLessThanOrEqual(511);
     // An unknown template, or text beside one, is refused: nothing is typed.
     expect(safePrompt.promptOf({ template: 'rm' }, { closeout: 'x' }).error).toMatch(/template must be one of: closeout/);
     expect(safePrompt.promptOf({ template: 'closeout', text: 'x' }, { closeout: 'x' }).error).toMatch(/not both/);

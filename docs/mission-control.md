@@ -224,9 +224,18 @@ Card = { id,                     // '<server>|<sessionId>|<kind>:<at>' - names t
   why: { blocks, blockedSessions: [{server, id, name}], subjects: [key], severity, ageMin, text },
                                  // text e.g. "blocks 3 sessions and 2 work items"
   rank, askedAt, decision: {...}|null, hasQuestion: bool,
+  questions: [{header: string|null, text: string}]|null,  // #531, kind 'question' only: the card face
   action: {steps: [string], where: string|null}|null,   // #522, kind 'action' only
   done: {state, refused, reason, at}|null }             // #522, an action card only (My to-do and a subject's
                                                         // needsYou, lib/mc-needs.js withDone): its Done record
+```
+`questions` (#531): what a question card asks, so the card shows the questions and never only "answer a
+question". The pending AskUserQuestion read as the Ask below reads it (in-process, or a peer's route with
+its stored token), at most 4 questions, each `{header (<= 40 chars, one line)|null, text (<= 400 chars,
+one line)}`; `null` when the question cannot be read (then the card shows that, not a guess). Cached 30 s
+per card id (8 s after a failed read) and waited for at most 1.5 s, so a slow peer costs `questions: null`
+on that card and never a slow Now. A subject's `needsYou` question card carries it too.
+```
 Todo = { id, cardId, kind, subjectKey, ref, title, project, text, server, sessionId, sessionName, createdAt, doneAt|null,
   park: { state: 'sending'|'delivered'|'refused'|'uncertain'|'none', refused: code|null, reason: words|null, at } }
 ```
@@ -240,8 +249,21 @@ time a view sees the session at a prompt, at its last activity then, holds while
 at the same kind of prompt in the same turn - redraws and hooks do not move it - and closes the first
 time a view sees it anywhere else, so the next prompt is a new card; kept in memory on the
 authority, so a restart opens new ones and a parked card comes back once; two prompts with no view
-computed between them read as one). `askedAt` = the wait's `at`, or the prompt's episode start. The card's subject is the first item
-the session carries that is not done.
+computed between them read as one). `askedAt` = the wait's `at`, or the prompt's episode start.
+**The item a card is about (#541)** - `subjectKey`, `ref`, `title` are the subject of the item the card is ABOUT, never the
+session's first item (a session works on several; a question about one showed the title of another). ONE rule,
+`lib/mc-needs.js` `subjectFor`, for the wait card, every ask and a possible ask: (1) the item the report NAMED - an optional
+`"ref"` on the `wait` and on each ask, which `lib/session-brief.js` accepts only when it is one of the session's own items
+(any spelling of it: `gh#5` is `#5`; a report of a wait or asks alone is checked against the items already reported; a
+wrong one is refused, naming the session's refs) and keeps as the session reported it; a name the session no longer reports
+is no subject, not a guess; (1b) a session started on ONE item that has reported nothing yet (a bound item, `lib/mc-binding.js`:
+the person said what it is for): that item; (2) a `you` wait with no `ref`: the ONE item reported `blocked`; (3) no `ref`: the open item
+whose title and note share at least two significant words with the card's own (the question and its context, or the wait's
+text; `lib/unreported-ask.js` `significantWordsOf`: words of four letters or more, cut to five, without the filler every sentence
+has - "this", "that", "with", "should", "would"...) and strictly more than any other item does; (4) else NO subject: `subjectKey`, `ref`,
+`title` and `project` are null, and a client shows the question itself with the session's name beneath. `project` is the
+subject's; an ask's `why.severity` is the subject's tracker severity (null with no subject; what a WAIT blocks, `why.subjects`
+and its severity, is still every item of the sessions it holds up).
 What it blocks (`why`): the asking session and every LIVE session above it in the tree
 (`lib/mc-tree.js` ancestors: an orchestrator waits on the children it opened), and the work items
 those carry (items reported done excluded). `severity` = the highest (lowest number) tracker
@@ -256,12 +278,12 @@ delivered: the decisions it holds for the person had no place to go, and the per
 report may carry `asks` (top level, beside `items` and `wait`; `lib/session-brief.js` owns it): the
 session's STANDING list of open decisions, complete across turns, up to 5, each the wait's decision shape
 (#492) with the `context` REQUIRED - `{question, context, options: [{label, consequence?}] x2-4,
-recommended?}` (a missing context, or any other bad shape, is refused with the right one quoted); two
+recommended?, ref?}` (`ref`: the item it is about, #541, above; a missing context, or any other bad shape, is refused with the right one quoted); two
 of the same question (case and spacing aside) are one. A report that names `asks` REPLACES the list (an
 ask it leaves out is gone), one without it KEEPS it - a `done`, `self` or `external` report, a wait-only
 report, all of them - and `"asks": []` clears it; a report of `asks` alone (`{"asks": [...]}`) updates an
 earlier report and leaves its wait as it was. Each ask keeps the time it was first asked while its
-question stands. `brief.asks` = `[{id, question, context, options, recommended?, at, maybeAnswered}]`
+question stands. `brief.asks` = `[{id, question, context, options, recommended?, ref?, at, maybeAnswered}]`
 (`[]` when none or reporting is off; a peer too old to send it has none); `id` is 8 hex of the question
 (`askDigest`).
 A session that holds open asks is never closed under them: the close-out (R5) neither asks, marks nor
@@ -403,15 +425,30 @@ Ask = { kind: 'question'|'permission'|'decision'|'wait'|'action'|'ask'|'possible
   Recommendation. `context` adds The work item (the tracker CACHE, `peek`, never a read), What the
   session did (its reported brief), Why it asks (a decision's context), What each answer does, and
   Summary (inbox digest) - the session's digest ONLY as cached (`?peek=1`: never starts a run).
-  `everything` adds Last turns (the recap: up to 3 prompts, the latest reply, the tools since) and
-  Links (the work item, its PRs, the session). No model runs for any level.
+  `everything` adds Last turns (#531: the session's own last turns, oldest first, `You (<age>): ...` /
+  `The agent (<age>): ...`; the recap when its transcript cannot be read) and Links (the work item, its
+  PRs, the session). No model runs for any level.
 - `followup {option: index|null, question: 1-2000 chars}`: the Analyst's bundle for the asking
   session alone (its brief, its recap, its items' cached details) plus one block holding the card's
   question and options - agent text, so inside the data fence; the person's words sit after the
   fence and name the option by NUMBER only. Answer shape and errors as Ask (`502`/`503`).
+  **The waiting session's last turns (#531)** are in that bundle too, as one source (`<session>: last
+  turns`) before the card's own block: the session's real transcript turns (`readTranscriptPage`,
+  the newest 60 read), real prompts and the agent's text only (a task notification, a slash-command
+  echo or a hook's feedback is not a turn), the last 14 at most, each capped at 3000 characters and all
+  at 14000, newest kept; a cut says "(Older turns are not shown.)". Without them the Analyst saw a
+  280-character recap and could not explain the terms of a question that the agent had defined in its
+  earlier text. A session whose transcript cannot be read falls back to the recap.
 - `suggest`: the same bundle; the model proposes 2-4 OTHER answers `{label (one line, <= 80),
   consequence (<= 240)}`; control characters are removed, a label the card already offers (no case)
   or given twice is dropped, none left = `502 bad-output`. `canSend` = the ask's `canSuggest`.
+- **Answered in place, asked in one tap (#531).** The companion's **Answer** on a card opens an answer
+  sheet inside Mission Control (no jump to the old inbox): an AskUserQuestion shows the answer panel
+  the session screen uses, whose frames (`buildAnswerFrames`) go through the existing server-typed
+  `POST /api/sessions/:id/answer` after the same pre-write re-check; a decision offers its options and
+  a box for the person's own words, a reported wait a reply box, a permission only **Open session**.
+  A card also carries **Ask about this** (opens the panel with its box for the whole question ready).
+  No new route: `GET /api/mc/now` gains `questions`, the Analyst's bundle gains the last turns.
 - NOTHING here reaches the waiting session. The companion sends only the person's final pick, after
   a confirm, through the existing answer paths: a decision -> the reply `Decision: <label>` (while
   the session still puts THAT decision), a wait -> the reply, a question -> `buildAnswerFrames` with

@@ -351,6 +351,7 @@ takes no action on any session yet.
   card; a pick is sent to the session as the reply `Decision: <label>`.
 - `POST /api/sessions` takes an optional `goal` (one line, up to 300 characters). A hand-off
   successor inherits it.
+- `POST /api/sessions` also takes an optional `model` (#533), a model name such as `sonnet`, `opus` or `claude-sonnet-5-5`: the server puts `--model <name>` inside the command's claude call, right after the `claude` program word (so `claude "go"; exit` still runs on that model), unless that call already names one (its own choice wins), and answers the model of the command it stored as `model`. A name with brackets such as `opus[1m]` is stored quoted. It is a 400, with a reason and nothing created, when the name is malformed, when the command has no claude call (`model` is only for claude sessions) or cannot be read as a plain shell line, or when the flag would push the command past its 500 characters (never cut to fit). The same rule and the same name check (`lib/model-flag.js`) serve the supervisor dispatcher's model (#525). A routine task (fix with a repro, review round, watch/deploy/merge run) names `sonnet`; design, ambiguous or security work and the one final gate stay on the default.
 - Every server appends its sessions' lifecycle (opened, hand-off, closed and why: closed, reaped,
   handed-off, exited, lost) to `logs/sessions-journal.jsonl` and serves it at `GET /api/journal?since=`.
 - `POST /api/sessions/:id/prompt {text}` types one `[web-terminal supervisor]` prompt, only when the
@@ -499,6 +500,14 @@ check and fix its uncommitted and untracked changes, unpushed branches, worktree
 and sessions it started, and the tracker. It answers as **state**, never prose:
 `node scripts/wt-closeout.js clean`, or `... blocked "<what is left>"` (`POST /api/session/:id/closeout`,
 hook token only). The rules are `lib/closeout.js`.
+- **Clean means the subject is finished in full (#543):** merged, not just pushed; every PR the
+  session opened completed (open, queued or building is not); reviews answered; leftovers only in a
+  tracker item; nothing it started still running. A PR it owns still open keeps it open, watching.
+  A PR **shared** by several sessions keeps exactly one owner open: the others answer
+  `clean --pr "<ref>" --owner <session id or name>`, and are ready to close only while that owner is a
+  live session (an id, a `replaces` alias, or a name one session carries) that has not reported done.
+  Naming itself is refused; an owner a complete scan does not find (`owner-gone`) or one that reported
+  done (`owner-done`) is **Needs you**, never ready, never closed.
 - The prompt is typed through the session's own server's gated prompt as a **template**
   (`{template: "closeout"}`): that server builds the text, naming its own path to `wt-closeout.js`.
   It is asked once per done; a typed prompt, or a report of a wait that is not `done`, is new work
@@ -798,6 +807,20 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   question it never listed shows as a **possible unreported question** (a fixed rule on the reply's
   end, no model). The supervisor's own dispatcher (#532) is no session of the lists and counts, but
   what it needs from you is a card like any other.
+  **Answered on the card (#541, companion):** an ask or decision card prints its question once; a tap
+  on an option chip answers through that same reply path after a 5-second Undo, and a tap on the card
+  (or its chevron) expands it in place: the context, every option with its consequence (the
+  recommended one starred), and a one-line reply of your own words. A pending AskUserQuestion card
+  opens the same way: the card reads the question on its session's screen, and a simple one (one
+  question, single choice, no preview, 2+ options) lists its options, a tap answering with the keys
+  the answer panel builds after the same Undo; anything else shows no options and **Answer** opens
+  the sheet.
+  **Which item a card is about (#541):** a wait or an ask may name its work item (`"ref"`, one of the
+  session's own items; a wrong one is refused with the list). A card shows that item's title; with no
+  `ref` it takes a session's one bound item before it reports, the one item reported blocked (a wait)
+  or the item whose title and note share at least two significant words (filler like "this" or
+  "should" never counts) with the question; otherwise it shows the question alone, never the title of the
+  session's first item. Two cards of one session can therefore carry different titles.
   **To my to-do** (`POST /api/mc/todo`) parks one for the desk and tells its session once, through
   the gated prompt, to carry on and report that wait as external; a refusal (unsent text in its
   prompt box, a turn running) is shown and sent again only when you ask. A to-do can be ticked done,
@@ -842,6 +865,12 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   side by side. None of it reaches the waiting session: only a suggestion you pick and confirm is
   sent, as the answer, through the same path as any answer (a decision's or a wait's reply, a
   question's `Other` row - which exists only for one compact question).
+- **Questions on the card, answered in place (#531):** a question card on Now shows what it asks - each
+  question's header and text, the first two and "+N more" - instead of "answer a question". **Answer**
+  opens an answer sheet inside Mission Control (an AskUserQuestion with the session screen's answer
+  panel, a decision by its options or your own words, a wait by a reply) through the existing
+  server-typed answer path; **Ask about this** on the card puts a question to the Analyst, which now
+  also reads the waiting session's last turns, so it can explain the terms the question uses.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 **Companion app** — a native Android + Windows client with the chat lens and push that

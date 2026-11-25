@@ -15,26 +15,26 @@ const MIN = 60 * 1000;
 test.describe('#525 the dispatcher runs Sonnet', () => {
   test('the default command runs Sonnet', () => {
     const d = cases.dispatcherConfig(null);
-    expect(d.autoCommand).toBe('claude --dangerously-skip-permissions --model sonnet');
+    expect(d.autoCommand).toBe('claude --model sonnet --dangerously-skip-permissions');
     expect(d.model).toBe('sonnet');
   });
 
   test('a configured command that names no model gets Sonnet too; one that names a model keeps it', () => {
-    expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --verbose' } }).autoCommand).toBe('claude --verbose --model sonnet');
+    expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --verbose' } }).autoCommand).toBe('claude --model sonnet --verbose');
     expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --model opus' } }).autoCommand).toBe('claude --model opus');
     expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --model=haiku --verbose' } }).autoCommand).toBe('claude --model=haiku --verbose');
     // A flag that only starts with --model is not one.
-    expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --models-dir x' } }).autoCommand).toBe('claude --models-dir x --model sonnet');
+    expect(cases.dispatcherConfig({ dispatcher: { autoCommand: 'claude --models-dir x' } }).autoCommand).toBe('claude --model sonnet --models-dir x');
   });
 
   test('dispatcher.model picks another model; "" or false runs the command as written; a bad name is never typed', () => {
-    expect(cases.dispatcherConfig({ dispatcher: { model: 'opus' } }).autoCommand).toBe('claude --dangerously-skip-permissions --model opus');
-    expect(cases.dispatcherConfig({ dispatcher: { model: 'claude-sonnet-5-5' } }).autoCommand).toMatch(/ --model claude-sonnet-5-5$/);
+    expect(cases.dispatcherConfig({ dispatcher: { model: 'opus' } }).autoCommand).toBe('claude --model opus --dangerously-skip-permissions');
+    expect(cases.dispatcherConfig({ dispatcher: { model: 'claude-sonnet-5-5' } }).autoCommand).toMatch(/^claude --model claude-sonnet-5-5 /);
     expect(cases.dispatcherConfig({ dispatcher: { model: '' } }).autoCommand).toBe('claude --dangerously-skip-permissions');
     expect(cases.dispatcherConfig({ dispatcher: { model: false } }).autoCommand).toBe('claude --dangerously-skip-permissions');
     for (const bad of ['opus; rm -rf /', 'a b', '"x"', '$(id)', '--print', '-x', 7]) {
       const d = cases.dispatcherConfig({ dispatcher: { model: bad } });
-      expect(d.autoCommand).toBe('claude --dangerously-skip-permissions --model sonnet');
+      expect(d.autoCommand).toBe('claude --model sonnet --dangerously-skip-permissions');
       expect(d.modelRefused).toBe(String(bad)); // said, not swallowed (logged at the start)
     }
     expect(cases.dispatcherConfig(null).modelRefused).toBeNull();

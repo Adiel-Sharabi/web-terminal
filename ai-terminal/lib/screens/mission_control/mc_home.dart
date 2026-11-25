@@ -9,7 +9,8 @@
 //
 // Nothing here touches the current home's split pane: a session opens on the app's one
 // session stack and the inbox is pushed as a route, both over Mission Control, so Back
-// returns here.
+// returns here. A card is answered in place (#531): "Answer" opens the answer sheet, a route
+// over Mission Control that sends through the same writers the inbox uses.
 
 import 'dart:async';
 
@@ -33,6 +34,7 @@ import '../adaptive_home.dart';
 import '../session_screen.dart' show openSessionOnStack;
 import '../settings_screen.dart';
 import '../work_board_screen.dart';
+import 'answer_sheet.dart';
 import 'ask_reply_dialog.dart';
 import 'ask_view.dart';
 import 'machines_view.dart';
@@ -140,11 +142,40 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     if (mounted) showTimedSnackBar(context, text);
   }
 
-  Future<bool> _sendPick(McCard card, String text, McQuestionAsk? shown) {
+  /// The writers are made on first use (see [_needs]) and a reply's #179 verdict is watched.
+  void _writersUsed() {
     _needsMade = true;
     _unconfirmed ??= _repo.sessions.listen(_needs.checkUnconfirmedReplies);
+  }
+
+  Future<bool> _sendPick(McCard card, String text, McQuestionAsk? shown) {
+    _writersUsed();
     return _picks.send(card, text, shown: shown);
   }
+
+  /// #531 - what the answer sheet may do: read the question on screen, send the answer panel's
+  /// frames, send words, open the session, ask the Analyst. Whatever went out, Now is read again.
+  late final McAnswerPort _answerPort = McAnswerPort(
+    pendingQuestion: (card) {
+      _writersUsed();
+      return _picks.pendingQuestion(card);
+    },
+    answerQuestion: (card, shown, frames) async {
+      _writersUsed();
+      final ok = await _picks.answerQuestion(card, shown, frames);
+      if (ok) unawaited(_feed.refresh());
+      return ok;
+    },
+    send: (card, text) async {
+      final ok = await _sendPick(card, text, null);
+      if (ok) unawaited(_feed.refresh());
+      return ok;
+    },
+    openSession: (card) {
+      if (card.sessionId != null) _openSession(card.sessionId!);
+    },
+    askAbout: (card) => McQuestionScope.openPanel(context, card: card, analyst: _analyst, onSend: _sendPick, askFirst: true),
+  );
 
   /// Desktop: whether the Ask panel is open beside the tab.
   bool _askPanel = false;
@@ -189,9 +220,9 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   void _openSession(String id, {Session? initial}) =>
       openSessionOnStack(Navigator.of(context), id, initialSession: initial);
 
-  /// A wait is answered in the questions inbox; an ask (#526) is no wait - its session is moving
-  /// on, so the inbox lists none - and is answered by a reply typed from its card, as is a
-  /// possible unreported question.
+  /// An ask (#526) is no wait - its session is moving on - so it is answered by a reply typed
+  /// from its card, as is a possible unreported question. A wait (#531) is answered in place,
+  /// on the answer sheet, never by leaving for the questions inbox.
   void _answer(McCard card) {
     if (card.usesReplyDialog) {
       showDialog<void>(
@@ -199,7 +230,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
         builder: (_) => McAskReplyDialog(card: card, onSend: (c, text) => _sendPick(c, text, null)),
       );
     } else {
-      pushInbox(Navigator.of(context), focusSessionId: card.sessionId);
+      McAnswerSheet.open(context, card: card, port: _answerPort);
     }
   }
 
@@ -314,7 +345,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   @override
   Widget build(BuildContext context) {
     // #510 - every question card below (Now, a subject) opens its panel through this.
-    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, child: _layout());
+    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, answerPort: _answerPort, child: _layout());
   }
 
   Widget _layout() {
