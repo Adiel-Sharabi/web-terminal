@@ -148,6 +148,11 @@ class Session {
   /// to carry launch flags forward when forking a session.
   final String autoCommand;
 
+  /// The model the launch command names (`sonnet`, `haiku`, ...), as the server reads it
+  /// (#533: `model` on the session list row); null = the default model, and also a server
+  /// too old to send one. Never derived from [autoCommand] here: the server owns that reading.
+  final String? model;
+
   /// The server this session was fetched from.
   final ServerConfig server;
 
@@ -303,6 +308,7 @@ class Session {
     required this.notifyLevel,
     required this.server,
     this.autoCommand = '',
+    this.model,
     this.metrics,
     this.agent,
     this.agentSessionId,
@@ -343,6 +349,7 @@ class Session {
     notifyLevel: notifyLevel,
     server: server,
     autoCommand: autoCommand,
+    model: model,
     metrics: metrics,
     agent: agent,
     agentSessionId: agentSessionId,
@@ -379,6 +386,7 @@ class Session {
       lastActivity: _asInt(json['lastActivity']),
       notifyLevel: (json['notifyLevel'] ?? 'important').toString(),
       autoCommand: (json['autoCommand'] ?? '').toString(),
+      model: json['model'] is String && (json['model'] as String).isNotEmpty ? json['model'] as String : null,
       server: server,
       metrics: SessionMetrics.fromJson(json['metrics']),
       agent: json['agent']?.toString(),

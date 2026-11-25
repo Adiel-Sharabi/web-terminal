@@ -955,7 +955,7 @@ class _McAnswerCardState extends State<McAnswerCard> {
     final why = c.why;
     final blocked = [for (final s in why.blockedSessions) ?s.name];
     final heading = [?c.ref, ?c.title].join('  ');
-    final session = [?c.sessionName, ?c.server].join(' · ');
+    final session = c.sessionLine;
     final decision = c.decision;
     final questions = McQuestionScope.maybeOf(context);
     final reply = _reply;
@@ -1390,7 +1390,7 @@ class McActionCard extends StatelessWidget {
     final steps = c.action?.steps ?? const <String>[];
     final where = c.action?.where;
     final heading = [?c.ref, ?c.title].join('  ');
-    final session = [?c.sessionName, ?c.server].join(' · ');
+    final session = c.sessionLine;
     final done = c.done;
     final notTold = done != null && done.notSent ? 'Its session was not told: ${done.reason ?? done.refused ?? 'refused'}' : null;
     // It may have landed (no answer came): never sent twice, so no Done; the card goes once

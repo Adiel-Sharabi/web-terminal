@@ -407,6 +407,17 @@ class McFeed extends ChangeNotifier {
   /// The machines a session can be started on, with the one the server suggests.
   Future<McMachines> machines() => _authority().mcMachines();
 
+  /// The kinds of work and models Start work offers (#533); null when the authority is too old to
+  /// take a choice (its 404) or the reply cannot draw a picker. Any other failure is thrown.
+  Future<McStartModels?> models() async {
+    try {
+      return await _authority().mcModels();
+    } on ApiException catch (e) {
+      if (e.status == 404) return null;
+      rethrow;
+    }
+  }
+
   /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]; the
   /// next answer shows it under its subject. Throws [ApiException] with the server's reason.
   Future<McStartResult> start({
@@ -417,9 +428,19 @@ class McFeed extends ChangeNotifier {
     String? brief,
     String? line,
     String? lineName,
+    String? kind,
+    String? model,
   }) async {
-    final r = await _authority()
-        .mcStart(project: project, subjects: subjects, hunt: hunt, server: server, brief: brief, line: line, lineName: lineName);
+    final r = await _authority().mcStart(
+        project: project,
+        subjects: subjects,
+        hunt: hunt,
+        server: server,
+        brief: brief,
+        line: line,
+        lineName: lineName,
+        kind: kind,
+        model: model);
     unawaited(refresh());
     return r;
   }
@@ -442,6 +463,7 @@ class McFeed extends ChangeNotifier {
       server: sv,
       agent: r.agent,
       agentReady: r.agentReady,
+      model: r.model,
     );
   }
 

@@ -1,10 +1,11 @@
 // #507 - Mission Control, the second home one build runs beside the current one.
 //
 // Desktop (at or above [AdaptiveHome.splitBreakpoint]): a side nav - Now, Lines,
-// Sessions, Machines - and an Ask panel beside any of them, opened from the nav (#511).
-// Phone: a bottom bar - Now, Lines, Ask, Machines. Lines (#523) is the lines of work, each
+// Sessions, Machines, Usage - and an Ask panel beside any of them, opened from the nav (#511).
+// Phone: a bottom bar - Now, Lines, Ask, Machines, Usage. Lines (#523) is the lines of work, each
 // line's page and each subject's (#508, #509; the projects, on a server with no lines), in its own navigator; Sessions is the
-// current sessions board; Machines is the board's machines and leases view. Ask (both
+// current sessions board; Machines is the board's machines and leases view; Usage (#529) is
+// where the weekly limit went (the usage ledger). Ask (both
 // layouts) is one conversation, kept across tabs.
 //
 // Nothing here touches the current home's split pane: a session opens on the app's one
@@ -42,6 +43,7 @@ import 'now_view.dart';
 import 'project_view.dart';
 import 'question_panel.dart';
 import 'start_work_sheet.dart';
+import 'usage_view.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
@@ -49,15 +51,16 @@ enum McTab {
   projects('Lines', Icons.account_tree_outlined, Icons.account_tree),
   sessions('Sessions', Icons.view_list_outlined, Icons.view_list),
   ask('Ask', Icons.forum_outlined, Icons.forum),
-  machines('Machines', Icons.dns_outlined, Icons.dns);
+  machines('Machines', Icons.dns_outlined, Icons.dns),
+  usage('Usage', Icons.insights_outlined, Icons.insights);
 
   const McTab(this.label, this.icon, this.selectedIcon);
   final String label;
   final IconData icon;
   final IconData selectedIcon;
 
-  static const List<McTab> desktopTabs = [now, projects, sessions, machines];
-  static const List<McTab> phoneTabs = [now, projects, ask, machines];
+  static const List<McTab> desktopTabs = [now, projects, sessions, machines, usage];
+  static const List<McTab> phoneTabs = [now, projects, ask, machines, usage];
 }
 
 class MissionControlHome extends StatefulWidget {
@@ -219,7 +222,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   void _onActive() {
     _feed.active = _isActive;
-    // The Sessions and Machines tabs poll on their own timers: they are dropped while
+    // The Sessions, Machines and Usage tabs poll on their own timers: they are dropped while
     // Mission Control is hidden and built again when it comes back.
     if (mounted) setState(() {});
   }
@@ -253,7 +256,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openLine(l.id));
   }
 
-  Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
+  Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines || tab == McTab.usage)
       ? const SizedBox.shrink()
       : switch (tab) {
         McTab.now => McNowView(
@@ -283,6 +286,12 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             client: _client,
             repository: widget.repository,
             onOpenSession: (s) => _openSession(s.id, initial: s),
+          ),
+        McTab.usage => McUsageView(
+            servers: _servers,
+            client: _client,
+            repository: widget.repository,
+            onOpenSession: (id) => _openSession(id),
           ),
       };
 

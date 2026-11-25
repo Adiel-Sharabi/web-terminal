@@ -421,6 +421,20 @@ class SessionCard extends StatelessWidget {
                   ],
                 ),
               ),
+              // #533 - the model the launch command names; absent = the default model. On its OWN
+              // line: the title row's fixed items (agent chip, server badge, buttons) already leave
+              // the session name ~76dp at 412dp, and the status row is as full, so a chip in either
+              // would squeeze the two things the row exists to show (session_card_narrow_test).
+              if (session.model != null) ...[
+                const SizedBox(height: 4),
+                Padding(
+                  padding: const EdgeInsets.only(left: 20),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: _ModelChip(model: session.model!),
+                  ),
+                ),
+              ],
               if (familyLabel != null && onFamilyTap != null) ...[
                 const SizedBox(height: 4),
                 Padding(
@@ -556,6 +570,37 @@ class _AgentChip extends StatelessWidget {
       child: Text(
         label,
         style: theme.textTheme.labelSmall?.copyWith(color: color),
+      ),
+    );
+  }
+}
+
+/// The model a session's launch command names (#533), as a small muted pill on its own line.
+/// A long model id ellipsizes (96dp at most) rather than make the card wider than its row.
+class _ModelChip extends StatelessWidget {
+  const _ModelChip({required this.model});
+
+  final String model;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final color = theme.colorScheme.onSurfaceVariant;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 96),
+      child: Container(
+        key: const ValueKey('session-model-chip'),
+        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(AppShape.small),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Text(
+          model,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: theme.textTheme.labelSmall?.copyWith(color: color),
+        ),
       ),
     );
   }

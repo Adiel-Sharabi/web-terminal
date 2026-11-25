@@ -136,7 +136,7 @@ class _McAnswerSheetState extends State<McAnswerSheet> {
   /// Where the card names its session and who is asking: a line over every body.
   Widget _from(BuildContext context) {
     final muted = Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
-    final line = [?_card.sessionName, ?_card.server].join(' · ');
+    final line = _card.sessionLine;
     return line.isEmpty ? const SizedBox.shrink() : Padding(padding: const EdgeInsets.fromLTRB(16, 8, 16, 0), child: Text(line, style: muted));
   }
 

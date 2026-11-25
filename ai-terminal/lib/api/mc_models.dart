@@ -291,6 +291,10 @@ class McCard {
   final String? serverUrl;
   final String? sessionId;
   final String? sessionName;
+
+  /// #533: the model the session's launch command names; null = the default model (or a server too
+  /// old to say).
+  final String? model;
   final String? project;
   final String? subjectKey;
   final String? ref;
@@ -326,6 +330,7 @@ class McCard {
     this.serverUrl,
     this.sessionId,
     this.sessionName,
+    this.model,
     this.project,
     this.subjectKey,
     this.ref,
@@ -359,6 +364,7 @@ class McCard {
       serverUrl: _str(m['serverUrl']),
       sessionId: _str(m['sessionId']),
       sessionName: _str(m['sessionName']),
+      model: _str(m['model']),
       project: _str(m['project']),
       subjectKey: _str(m['subjectKey']),
       ref: _str(m['ref']),
@@ -377,6 +383,10 @@ class McCard {
 
   /// #522: a thing to DO, never phrased or answered as a question.
   bool get isAction => kind == 'action';
+
+  /// The session line every card shows - its name, the machine it runs on and (#533) the model its
+  /// command names - one place so the card faces never spell it differently.
+  String get sessionLine => [?sessionName, ?server, ?model].join(' · ');
 
   /// Answered in the questions inbox, which takes every kind of wait on the person (a
   /// question, a permission, a decision, a reported wait: #383) - so any card with a session.
@@ -807,6 +817,10 @@ class McSubjectSession {
   final String? server;
   final String? serverUrl;
   final String? name;
+
+  /// #533: the model its launch command names; null = the default model (a closed record, or a
+  /// server too old to say).
+  final String? model;
   final String? parentId;
   final String? status;
   final bool closed;
@@ -819,6 +833,7 @@ class McSubjectSession {
     this.server,
     this.serverUrl,
     this.name,
+    this.model,
     this.parentId,
     this.status,
     this.closed = false,
@@ -836,6 +851,7 @@ class McSubjectSession {
       server: _str(m['server']),
       serverUrl: _str(m['serverUrl']),
       name: _str(m['name']),
+      model: _str(m['model']),
       parentId: _str(m['parentId']),
       status: _str(m['status']),
       closed: _bool(m['closed']),
@@ -1230,8 +1246,20 @@ class McStartResult {
   /// The agent the server resolved, and whether it is ready (#147: absent = ready).
   final String? agent;
   final bool agentReady;
+
+  /// #533: the model and the kind of work the server started it with (null: none was asked for,
+  /// or the default model).
+  final String? model;
+  final String? kind;
   const McStartResult(
-      {required this.sessionId, this.name, this.server, this.serverUrl, this.agent, this.agentReady = true});
+      {required this.sessionId,
+      this.name,
+      this.server,
+      this.serverUrl,
+      this.agent,
+      this.agentReady = true,
+      this.model,
+      this.kind});
 
   static McStartResult? fromJson(dynamic json) {
     final m = _map(json);
@@ -1244,7 +1272,104 @@ class McStartResult {
       serverUrl: _str(m['serverUrl']),
       agent: _str(m['agent']),
       agentReady: m['agentReady'] != false,
+      model: _str(m['model']),
+      kind: _str(m['kind']),
     );
+  }
+}
+
+/// A kind of work Start work offers (#533), with the model it suggests: [model] null = the default
+/// model.
+class McModelKind {
+  final String id;
+  final String label;
+  final String? model;
+  const McModelKind({required this.id, required this.label, this.model});
+
+  static McModelKind? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McModelKind(id: id, label: _str(m['label']) ?? id, model: _str(m['model']));
+  }
+}
+
+/// A model Start work lists (#533): the id the start request carries, and its label.
+class McModelChoice {
+  final String id;
+  final String label;
+  const McModelChoice({required this.id, required this.label});
+
+  static McModelChoice? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McModelChoice(id: id, label: _str(m['label']) ?? id);
+  }
+}
+
+/// `GET /api/mc/models` (#533): the kinds of work, the model each suggests and the models Start work
+/// lists. Having it at all is how the app knows the authority takes `kind` / `model`: an older one
+/// answers 404 and the sheet draws no picker. A reply with no kinds or no models is the same as none,
+/// and so is one saying `modelPlaceable: false` (the authority's start command cannot take `--model`: a
+/// choice sent to it would be a 400 on a start that works without one). An absent field reads as true.
+class McStartModels {
+  final List<McModelKind> kinds;
+  final List<McModelChoice> models;
+
+  /// The kind each start begins on: work items (`subjects`), a bug hunt (`hunt`).
+  final String? subjectsKind;
+  final String? huntKind;
+
+  /// The id that means "no flag" (the server's `defaultModel`).
+  final String defaultModel;
+  const McStartModels({
+    this.kinds = const [],
+    this.models = const [],
+    this.subjectsKind,
+    this.huntKind,
+    this.defaultModel = 'default',
+  });
+
+  /// Null when the reply cannot draw a picker (no kinds, no models, or a start command that cannot
+  /// take the flag).
+  static McStartModels? fromJson(dynamic json) {
+    final m = _map(json);
+    if (m['modelPlaceable'] == false) return null;
+    final kinds = _list(m['kinds'], McModelKind.fromJson);
+    final models = _list(m['models'], McModelChoice.fromJson);
+    if (kinds.isEmpty || models.isEmpty) return null;
+    final d = _map(m['defaults']);
+    return McStartModels(
+      kinds: kinds,
+      models: models,
+      subjectsKind: _str(d['subjects']),
+      huntKind: _str(d['hunt']),
+      defaultModel: _str(m['defaultModel']) ?? 'default',
+    );
+  }
+
+  McModelKind? kind(String? id) {
+    for (final k in kinds) {
+      if (k.id == id) return k;
+    }
+    return null;
+  }
+
+  /// The kind id a start begins on: a bug hunt's, else the work items'; the first kind when the
+  /// server named none it lists.
+  String kindFor({required bool hunt}) => (kind(hunt ? huntKind : subjectsKind) ?? kinds.first).id;
+
+  /// The model id the kind suggests, as the start request carries it (the default model's id for a
+  /// kind that names none).
+  String suggestedModel(String kindId) => kind(kindId)?.model ?? defaultModel;
+
+  /// A model's label, or its id for one the list does not carry.
+  String labelOf(String id) {
+    for (final c in models) {
+      if (c.id == id) return c.label;
+    }
+    return id;
   }
 }
 

@@ -18,6 +18,7 @@ import 'mc_ask_models.dart';
 import 'mc_models.dart';
 import 'models.dart';
 import 'supervisor_models.dart';
+import 'usage_ledger_models.dart';
 
 /// Uniform error type for every [ApiClient] operation.
 ///
@@ -360,6 +361,19 @@ class ApiClient {
     return listing;
   }
 
+  /// The usage ledger (`GET /api/usage-ledger`, #529): the weekly totals, the sessions that
+  /// burned the most and why. With [cluster] the server merges the other machines' ledgers; a
+  /// peer too old for the route is named in the answer's `skipped`, never an error. A server
+  /// too old for the route 404s, thrown like any failure; a body that is not a report is a
+  /// transport-level failure, never "no usage".
+  Future<UsageLedger> usageLedger({int days = 7, int weeks = 6, int top = 10, bool cluster = true}) async {
+    final res = await _send('GET', '/api/usage-ledger?days=$days&weeks=$weeks&top=$top${cluster ? '&cluster=1' : ''}',
+        timeout: const Duration(seconds: 20));
+    final body = _decode(res);
+    if (body is! Map<String, dynamic> || body['weeks'] is! List) throw const ApiException(0, 'Malformed server response');
+    return UsageLedger.fromJson(body);
+  }
+
   /// The supervisor's view of the cluster (`GET /api/supervisor/state`, #466). Only the
   /// lease authority carries the graph; any other server answers `role: peer` with the
   /// authority's name, or `role: none`. A server too old for the route 404s, thrown like
@@ -556,8 +570,15 @@ class ApiClient {
   /// The machines a session can be started on, the suggested one named (`GET /api/mc/machines`, #512).
   Future<McMachines> mcMachines() async => McMachines.fromJson(await _mcGet('/api/mc/machines'));
 
+  /// The kinds of work and the models Start work offers, each kind's suggestion included
+  /// (`GET /api/mc/models`, #533). An authority older than that answers 404 (an [ApiException]);
+  /// null when the reply cannot draw a picker.
+  Future<McStartModels?> mcModels() async => McStartModels.fromJson(await _mcGet('/api/mc/models'));
+
   /// Starts a session bound to [project] and [subjects] (or a [hunt]) on [server]
   /// (`POST /api/mc/start`, #512). A refusal is an [ApiException] with the server's reason.
+  /// [kind] and [model] (#533) are sent only by a caller that asked [mcModels] first: the server
+  /// puts `--model` into the command it starts and names the choice in the session's brief.
   Future<McStartResult> mcStart({
     required String project,
     List<String> subjects = const [],
@@ -567,6 +588,8 @@ class ApiClient {
     String? brief,
     String? line,
     String? lineName,
+    String? kind,
+    String? model,
   }) async {
     final r = McStartResult.fromJson(await _mcPost('/api/mc/start', {
       'project': project,
@@ -577,6 +600,8 @@ class ApiClient {
       'brief': ?brief,
       'line': ?line,
       'lineName': ?lineName,
+      'kind': ?kind,
+      'model': ?model,
       // The server may wait on the tracker (1.5 s) and on a peer's create (15 s): the app
       // must not give up first and invite a second start of the same session.
     }, timeout: kMcStartTimeout));

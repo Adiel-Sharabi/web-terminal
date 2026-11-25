@@ -59,6 +59,18 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
   String? _machinesError;
   String? _server;
 
+  /// #533 - the kinds of work and models the authority offers; null = no picker (the authority is
+  /// older than the picker, or it could not be read: starting work never waits on it).
+  McStartModels? _models;
+  bool _modelsLoading = true;
+  String? _kind;
+  String? _model;
+
+  /// Whether the person chose the kind / the model themselves: a later change of mode or kind
+  /// then no longer overwrites their choice with the suggestion.
+  bool _kindPicked = false;
+  bool _modelPicked = false;
+
   /// #523 - the line to bind to: null none, [_newLine] a new name, else a line id.
   String? _line;
   static const String _newLine = '+new';
@@ -82,6 +94,7 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
     _loadSubjects();
     _loadLines();
     _loadMachines();
+    _loadModels();
   }
 
   @override
@@ -169,9 +182,51 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
     }
   }
 
+  /// The picker's data. A 404 (an authority without the picker) or any failure leaves the picker
+  /// out and the start without a `kind` / `model`, so the session starts as it always did.
+  Future<void> _loadModels() async {
+    McStartModels? m;
+    try {
+      m = await widget.feed.models();
+    } catch (_) {
+      m = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _models = m;
+      _modelsLoading = false;
+      if (m != null) {
+        _kind = m.kindFor(hunt: _hunt);
+        _model = m.suggestedModel(_kind!);
+      }
+    });
+  }
+
+  /// Work items <-> hunt: the kind follows the mode (a hunt is open-ended, so it begins on the
+  /// stronger model) unless the person picked a kind; the model follows the kind unless picked.
+  void _setMode(bool hunt) {
+    final m = _models;
+    setState(() {
+      _hunt = hunt;
+      if (m != null && !_kindPicked) _kind = m.kindFor(hunt: hunt);
+      if (m != null && !_modelPicked) _model = m.suggestedModel(_kind!);
+    });
+  }
+
+  void _setKind(String? id) {
+    final m = _models;
+    if (m == null || id == null) return;
+    setState(() {
+      _kind = id;
+      _kindPicked = true;
+      if (!_modelPicked) _model = m.suggestedModel(id);
+    });
+  }
+
   List<String> get _chosen => [..._ticked, ...mcTypedRefs(_refs.text)];
 
-  bool get _canStart => !_busy && _project != null && _server != null && (_hunt || _chosen.isNotEmpty);
+  bool get _canStart =>
+      !_busy && !_modelsLoading && _project != null && _server != null && (_hunt || _chosen.isNotEmpty);
 
   Future<void> _start() async {
     setState(() {
@@ -189,6 +244,9 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
         hunt: _hunt,
         server: _server!,
         brief: brief.isEmpty ? null : brief,
+        // Only an authority that offered the picker is asked to place a model.
+        kind: _models == null ? null : _kind,
+        model: _models == null ? null : _model,
       );
       if (mounted) Navigator.of(context).pop(r);
     } on ApiException catch (e) {
@@ -199,6 +257,53 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  /// #533 - the kind of work and the model it runs on. The kind suggests a model (marked in the
+  /// list); the person may pick another, and that choice sticks across a change of kind.
+  List<Widget> _modelPicker(McStartModels models, TextStyle? muted) {
+    final kind = _kind!;
+    final model = _model!;
+    final suggested = models.suggestedModel(kind);
+    return [
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        key: const ValueKey('mc-start-kind'),
+        initialValue: kind,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Kind of work'),
+        items: [
+          for (final k in models.kinds) DropdownMenuItem(value: k.id, child: Text(k.label, overflow: TextOverflow.ellipsis)),
+        ],
+        onChanged: _setKind,
+      ),
+      const SizedBox(height: 12),
+      DropdownButtonFormField<String>(
+        key: const ValueKey('mc-start-model'),
+        initialValue: model,
+        isExpanded: true,
+        decoration: const InputDecoration(labelText: 'Model'),
+        items: [
+          for (final c in models.models) _modelItem(models, c.id, suggested),
+          if (!models.models.any((c) => c.id == model)) _modelItem(models, model, suggested),
+        ],
+        onChanged: (v) {
+          if (v != null) {
+            setState(() {
+              _model = v;
+              _modelPicked = true;
+            });
+          }
+        },
+      ),
+      const SizedBox(height: 4),
+      Text('The agent\'s brief says which model it runs on and why.', key: const ValueKey('mc-start-model-note'), style: muted),
+    ];
+  }
+
+  DropdownMenuItem<String> _modelItem(McStartModels models, String id, String suggested) => DropdownMenuItem(
+        value: id,
+        child: Text('${models.labelOf(id)}${id == suggested ? ' (suggested)' : ''}', overflow: TextOverflow.ellipsis),
+      );
 
   @override
   Widget build(BuildContext context) {
@@ -238,7 +343,7 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
               ButtonSegment(value: true, label: Text('Hunt'), icon: Icon(Icons.bug_report_outlined)),
             ],
             selected: {_hunt},
-            onSelectionChanged: (s) => setState(() => _hunt = s.first),
+            onSelectionChanged: (s) => _setMode(s.first),
           ),
           const SizedBox(height: 8),
           if (_hunt)
@@ -319,6 +424,7 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
               ],
               onChanged: (v) => setState(() => _server = v),
             ),
+          if (_models != null) ..._modelPicker(_models!, muted),
           const SizedBox(height: 12),
           TextField(
             key: const ValueKey('mc-start-brief'),

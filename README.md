@@ -856,12 +856,23 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   details), capped in size, and it never types into a session. In the companion: the **Ask** tab
   on a phone, the **Ask** panel beside any tab on desktop; each source opens its session or link.
   Config `mcAnalyst` (`enabled`, `model`, `command`, `timeoutMs`) in `config.json` only.
+- **Usage ledger (#529):** where the weekly Claude limit went. `GET /api/usage-ledger` (`?cluster=1` merges the other
+  machines; a peer too old for it is skipped, not an error) reads the files `usage-monitor.js` keeps under `~/.claude`
+  (followed incrementally, never read whole per request) and answers the weekly totals, the sessions that burned the most
+  and why each is big (cold cache writes, a huge context re-read every turn, a long run, check-in wakes), all in weighted
+  cost units, an estimate. The companion's Mission Control has a **Usage** tab; a row opens its session while it exists.
 - **Start work (#512):** one entry point in the companion's Mission Control (Now, Projects and each
   project's page): pick a project, then work items (or a bug hunt with no list), then a machine (the
   least-loaded healthy one is suggested by `GET /api/mc/machines`). `POST /api/mc/start` creates the
   session in the project's folder with a name and a brief for its agent, and binds it to the project
   and work items at birth, so it shows under them before its first report; sessions it starts
-  inherit the binding. Config `mc.startCommand` sets the launch command.
+  inherit the binding. Config `mc.startCommand` sets the launch command. **Model per task (#533):** the
+  sheet also asks for the kind of work (routine fix, watch/deploy/merge run, lookup, design) and shows the
+  model that kind suggests - Sonnet, Haiku, or the default model for design-heavy work - which the person
+  may override; the session starts with `--model` and its brief says which model and why
+  (`GET /api/mc/models`; the picker is drawn only when the configured start command can take the flag,
+  so a start command that launches no `claude` keeps starting as before). A session's model shows as a
+  small chip on the sessions list and on Mission Control's cards and session rows.
 - **Lines of work (#523):** a project runs several lines of work side by side (a bug hunt, health
   checks, a feature, a release cut), and Mission Control shows each line apart, at the top of Now
   and in the Lines tab, with its stage bar, what needs you, its sessions and machines; the project is

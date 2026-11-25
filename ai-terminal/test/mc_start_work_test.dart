@@ -38,9 +38,11 @@ final Map<String, dynamic> _machines = {
   'generatedAt': 1,
 };
 
-/// Alpha is the authority. [start] answers `POST /api/mc/start`.
+/// Alpha is the authority. [start] answers `POST /api/mc/start`; [models] answers
+/// `GET /api/mc/models` (#533) - null is an authority older than the picker (404).
 class _Authority {
   final List<http.Request> requests = [];
+  Object? models;
   (int, Object) start = (200, {'server': 'beta', 'serverUrl': 'https://beta.example.test', 'sessionId': 'new-1', 'name': 'Web Terminal #42'});
 
   http.Response _answer(http.Request req) {
@@ -49,6 +51,7 @@ class _Authority {
     if (path == '/api/mc/now') return http.Response(jsonEncode(_json('mc_now.json')), 200);
     if (path == '/api/mc/subjects') return http.Response(jsonEncode(_json('mc_subjects.json')), 200);
     if (path == '/api/mc/machines') return http.Response(jsonEncode(_machines), 200);
+    if (path == '/api/mc/models' && models != null) return http.Response(jsonEncode(models), 200);
     if (path == '/api/mc/start') return http.Response(jsonEncode(start.$2), start.$1);
     return http.Response(jsonEncode({'error': 'Not found'}), 404);
   }
@@ -70,6 +73,22 @@ Future<void> _size(WidgetTester tester, Size s) async {
   addTearDown(tester.view.resetPhysicalSize);
   addTearDown(tester.view.resetDevicePixelRatio);
 }
+
+/// The start sheet's model picker: what the authority serves, as the server's own catalogue (a JS
+/// spec pins this file to it).
+Map<String, dynamic> _modelsFixture() => _json('mc_models.json');
+
+/// Picks [label] in the dropdown [key]: opens it, taps the item in the menu.
+Future<void> _pick(WidgetTester tester, String key, String label) async {
+  await tester.ensureVisible(find.byKey(ValueKey(key)));
+  await tester.tap(find.byKey(ValueKey(key)));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
+}
+
+String? _shown(WidgetTester tester, String key) =>
+    tester.widget<DropdownButtonFormField<String>>(find.byKey(ValueKey(key))).initialValue;
 
 /// A page with one button that opens the sheet for [projectId].
 Widget _host(McFeed feed, List<String> opened, {String? projectId}) => MaterialApp(
@@ -101,6 +120,46 @@ void main() {
       expect(McStartResult.fromJson({'sessionId': 'x', 'server': 'beta'})!.server, 'beta');
       expect(McStartResult.fromJson({'server': 'beta'}), isNull);
       expect(mcTypedRefs(' #1, ado:2  owner/r#3 ,,'), ['#1', 'ado:2', 'owner/r#3']);
+    });
+
+    test('#533 the model catalogue parses; what cannot draw a picker is no catalogue', () {
+      final m = McStartModels.fromJson(_modelsFixture())!;
+      expect(m.kinds.map((k) => k.id).toList(), ['fix', 'run', 'lookup', 'design']);
+      expect(m.models.map((c) => c.id).toList(), ['default', 'sonnet', 'haiku']);
+      // Work items begin on a routine fix, a hunt on design work (the server's defaults).
+      expect(m.kindFor(hunt: false), 'fix');
+      expect(m.kindFor(hunt: true), 'design');
+      // A kind suggests its model; the design kind names none = the default model's id.
+      expect(m.suggestedModel('fix'), 'sonnet');
+      expect(m.suggestedModel('lookup'), 'haiku');
+      expect(m.suggestedModel('design'), 'default');
+      expect(m.labelOf('haiku'), 'Haiku');
+      expect(m.labelOf('claude-x'), 'claude-x');
+      // A server naming no default kind we list: the first kind, never a crash.
+      expect(McStartModels.fromJson({..._modelsFixture(), 'defaults': {'subjects': 'nope'}})!.kindFor(hunt: false), 'fix');
+      // Junk, or a reply with no kinds or no models: no picker.
+      expect(McStartModels.fromJson({'kinds': [7, null], 'models': _modelsFixture()['models']}), isNull);
+      expect(McStartModels.fromJson({'kinds': _modelsFixture()['kinds'], 'models': []}), isNull);
+      expect(McStartModels.fromJson('x'), isNull);
+      // A start command that cannot take --model (`modelPlaceable: false`) draws no picker, like an older
+      // authority; a server that says nothing about it reads as able.
+      expect(McStartModels.fromJson({..._modelsFixture(), 'modelPlaceable': false}), isNull);
+      expect(McStartModels.fromJson({..._modelsFixture(), 'modelPlaceable': true}), isNotNull);
+      expect(McStartModels.fromJson({..._modelsFixture()}..remove('modelPlaceable')), isNotNull);
+    });
+
+    test('#533 the start answer, a card and a session row carry their model', () {
+      final r = McStartResult.fromJson({'sessionId': 'x', 'model': 'sonnet', 'kind': 'fix'})!;
+      expect([r.model, r.kind], ['sonnet', 'fix']);
+      expect(McStartResult.fromJson({'sessionId': 'x'})!.model, isNull);
+      expect(McSubjectSession.fromJson({'id': 's', 'model': 'haiku'})!.model, 'haiku');
+      expect(McSubjectSession.fromJson({'id': 's', 'model': ''})!.model, isNull);
+      // The session line a card face shows: name, machine and model - what is absent is left out.
+      final c = McCard.fromJson({'id': 'c', 'sessionName': 'WI 7', 'server': 'beta', 'model': 'sonnet'})!;
+      expect(c.model, 'sonnet');
+      expect(c.sessionLine, 'WI 7 · beta · sonnet');
+      expect(McCard.fromJson({'id': 'c', 'sessionName': 'WI 7', 'server': 'beta'})!.sessionLine, 'WI 7 · beta');
+      expect(McCard.fromJson({'id': 'c'})!.sessionLine, '');
     });
   });
 
@@ -181,6 +240,147 @@ void main() {
       expect(find.text('Web Terminal has no folder to start in'), findsOneWidget);
       expect(opened, isEmpty);
       expect(find.byKey(const ValueKey('mc-start-sheet')), findsOneWidget);
+    });
+  });
+
+  group('#533 model picker', () {
+    Future<_Authority> open(WidgetTester tester, {bool withModels = true, List<String>? opened}) async {
+      await _size(tester, const Size(900, 1600));
+      final auth = _Authority();
+      if (withModels) auth.models = _modelsFixture();
+      final feed = auth.feed();
+      await feed.refresh();
+      await tester.pumpWidget(_host(feed, opened ?? <String>[], projectId: 'web-terminal'));
+      await tester.tap(find.byKey(const ValueKey('open')));
+      await tester.pumpAndSettle();
+      return auth;
+    }
+
+    testWidgets('work items begin on the routine-fix kind and Sonnet, marked as the suggestion; the start carries both', (tester) async {
+      final auth = await open(tester);
+      expect(_shown(tester, 'mc-start-kind'), 'fix');
+      expect(_shown(tester, 'mc-start-model'), 'sonnet');
+      expect(find.text('Sonnet (suggested)'), findsWidgets);
+      expect(find.byKey(const ValueKey('mc-start-model-note')), findsOneWidget);
+
+      await tester.enterText(find.byKey(const ValueKey('mc-start-refs')), '#5');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single, containsPair('kind', 'fix'));
+      expect(auth.startBodies.single, containsPair('model', 'sonnet'));
+    });
+
+    testWidgets('a hunt begins on design work and the default model, and the start says so', (tester) async {
+      final auth = await open(tester);
+      await tester.tap(find.text('Hunt'));
+      await tester.pumpAndSettle();
+      expect(_shown(tester, 'mc-start-kind'), 'design');
+      expect(_shown(tester, 'mc-start-model'), 'default');
+      expect(find.text('Default model (suggested)'), findsWidgets);
+      // Back to work items: the kind follows the mode again while nothing was picked.
+      await tester.tap(find.text('Work items'));
+      await tester.pumpAndSettle();
+      expect(_shown(tester, 'mc-start-kind'), 'fix');
+      expect(_shown(tester, 'mc-start-model'), 'sonnet');
+      await tester.tap(find.text('Hunt'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single, containsPair('hunt', true));
+      expect(auth.startBodies.single, containsPair('kind', 'design'));
+      expect(auth.startBodies.single, containsPair('model', 'default'));
+    });
+
+    testWidgets('picking another kind moves the model to that kind\'s suggestion', (tester) async {
+      await open(tester);
+      await _pick(tester, 'mc-start-kind', 'Lookup, status check or build');
+      expect(_shown(tester, 'mc-start-kind'), 'lookup');
+      expect(_shown(tester, 'mc-start-model'), 'haiku');
+      await _pick(tester, 'mc-start-kind', 'Design, ambiguous or security work');
+      expect(_shown(tester, 'mc-start-model'), 'default');
+    });
+
+    testWidgets('a model the person picked sticks across a change of kind and of mode, and is what the start sends', (tester) async {
+      final auth = await open(tester);
+      await _pick(tester, 'mc-start-model', 'Haiku');
+      expect(_shown(tester, 'mc-start-model'), 'haiku');
+      await _pick(tester, 'mc-start-kind', 'Design, ambiguous or security work');
+      expect(_shown(tester, 'mc-start-kind'), 'design');
+      expect(_shown(tester, 'mc-start-model'), 'haiku');
+      await tester.tap(find.text('Hunt'));
+      await tester.pumpAndSettle();
+      expect(_shown(tester, 'mc-start-model'), 'haiku');
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single, containsPair('kind', 'design'));
+      expect(auth.startBodies.single, containsPair('model', 'haiku'));
+    });
+
+    testWidgets('a kind the person picked is not moved by the mode', (tester) async {
+      await open(tester);
+      await _pick(tester, 'mc-start-kind', 'Watch, deploy or merge run');
+      await tester.tap(find.text('Hunt'));
+      await tester.pumpAndSettle();
+      expect(_shown(tester, 'mc-start-kind'), 'run');
+      expect(_shown(tester, 'mc-start-model'), 'sonnet');
+    });
+
+    testWidgets('an authority older than the picker (404): no picker, and the start sends neither kind nor model', (tester) async {
+      final auth = await open(tester, withModels: false);
+      expect(find.byKey(const ValueKey('mc-start-kind')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-start-model')), findsNothing);
+      await tester.enterText(find.byKey(const ValueKey('mc-start-refs')), '#5');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single.containsKey('kind'), isFalse);
+      expect(auth.startBodies.single.containsKey('model'), isFalse);
+    });
+
+    testWidgets('a catalogue that cannot draw a picker is the same as none: the work still starts', (tester) async {
+      await _size(tester, const Size(900, 1600));
+      final auth = _Authority()..models = {'kinds': [], 'models': []};
+      final feed = auth.feed();
+      await feed.refresh();
+      await tester.pumpWidget(_host(feed, <String>[], projectId: 'web-terminal'));
+      await tester.tap(find.byKey(const ValueKey('open')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-start-kind')), findsNothing);
+      await tester.enterText(find.byKey(const ValueKey('mc-start-refs')), '#5');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single.containsKey('model'), isFalse);
+    });
+
+    testWidgets('a start command that cannot take --model (modelPlaceable false): no picker, and the start sends neither kind nor model', (tester) async {
+      await _size(tester, const Size(900, 1600));
+      final auth = _Authority()..models = {..._modelsFixture(), 'modelPlaceable': false};
+      final feed = auth.feed();
+      await feed.refresh();
+      await tester.pumpWidget(_host(feed, <String>[], projectId: 'web-terminal'));
+      await tester.tap(find.byKey(const ValueKey('open')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-start-kind')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-start-model')), findsNothing);
+      await tester.enterText(find.byKey(const ValueKey('mc-start-refs')), '#5');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('mc-start-go')));
+      await tester.pumpAndSettle();
+      expect(auth.startBodies.single.containsKey('kind'), isFalse);
+      expect(auth.startBodies.single.containsKey('model'), isFalse);
+    });
+
+    testWidgets('the session it opens carries the model the server started it with', (tester) async {
+      await _size(tester, const Size(900, 1600));
+      final auth = _Authority()
+        ..models = _modelsFixture()
+        ..start = (200, {'server': 'alpha', 'serverUrl': null, 'sessionId': 'new-3', 'model': 'sonnet', 'kind': 'fix'});
+      final feed = auth.feed();
+      await feed.refresh();
+      final s = feed.startedSession(McStartResult.fromJson(auth.start.$2)!);
+      expect(s?.model, 'sonnet');
     });
   });
 

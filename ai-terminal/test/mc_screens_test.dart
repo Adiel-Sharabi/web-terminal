@@ -122,6 +122,9 @@ void main() {
       expect(tester.getTopLeft(first).dy, lessThan(tester.getTopLeft(second).dy), reason: "the server's order");
       Finder inFirst(Finder f) => find.descendant(of: first, matching: f);
       expect(inFirst(find.text('Web Terminal')), findsOneWidget);
+      // #533: the session line names the model the session's command runs; a card with none says nothing.
+      expect(inFirst(find.text('Fix the login loop · alpha · sonnet')), findsOneWidget);
+      expect(find.descendant(of: second, matching: find.text('Tidy the readme · beta')), findsOneWidget);
       expect(inFirst(find.text('#41  Login loops after a token refresh')), findsOneWidget);
       expect(inFirst(find.text('blocks 3 sessions - waiting: Child: write the test, Child: check the docs')), findsOneWidget);
       expect(inFirst(find.text('42 min')), findsOneWidget);
@@ -243,6 +246,7 @@ void main() {
       expect(find.byKey(const ValueKey('mc-card-alpha|s-3|action:1')), findsNothing);
       Finder inCard(Finder f) => find.descendant(of: card, matching: f);
       expect(inCard(find.text('try on-duty on 0.2.51')), findsOneWidget);
+      expect(inCard(find.text('TacticalMap release · alpha')), findsOneWidget, reason: 'no model on the wire: none on the line');
       expect(inCard(find.text('phone')), findsOneWidget);
       expect(inCard(find.text('Install 0.2.51')), findsOneWidget);
       expect(inCard(find.text('3.')), findsOneWidget);
@@ -398,11 +402,11 @@ void main() {
       return toSessions;
     }
 
-    testWidgets('desktop: a side nav of Now, Lines, Sessions, Machines', (tester) async {
+    testWidgets('desktop: a side nav of Now, Lines, Sessions, Machines, Usage', (tester) async {
       await pump(tester, const Size(1400, 900));
       expect(find.byKey(const ValueKey('mc-rail')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsNothing);
-      for (final l in ['Now', 'Lines', 'Sessions', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Sessions', 'Machines', 'Usage']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text(l)), findsOneWidget);
       }
       expect(find.descendant(of: find.byKey(const ValueKey('mc-rail')), matching: find.text('Ask')), findsNothing);
@@ -428,11 +432,11 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('phone: a bottom bar of Now, Lines, Ask, Machines; Ask is the Ask view (#511)', (tester) async {
+    testWidgets('phone: a bottom bar of Now, Lines, Ask, Machines, Usage; Ask is the Ask view (#511)', (tester) async {
       await pump(tester, const Size(400, 860));
       expect(find.byKey(const ValueKey('mc-bottom-bar')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-rail')), findsNothing);
-      for (final l in ['Now', 'Lines', 'Ask', 'Machines']) {
+      for (final l in ['Now', 'Lines', 'Ask', 'Machines', 'Usage']) {
         expect(find.descendant(of: find.byKey(const ValueKey('mc-bottom-bar')), matching: find.text(l)), findsOneWidget);
       }
       await tester.tap(find.text('Ask'));

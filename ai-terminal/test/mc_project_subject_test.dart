@@ -372,6 +372,12 @@ void main() {
       await pump(tester);
       final parent = find.byKey(const ValueKey('mc-node-s-1'));
       expect(parent, findsOneWidget);
+      // #533: a session row names the model its command runs; the rows with none show no tag.
+      expect(find.descendant(of: find.byKey(const ValueKey('mc-session-s-2')), matching: find.text('haiku')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-session-model-s-2')), findsOneWidget);
+      for (final none in ['s-1', 's-3', 's-4']) {
+        expect(find.byKey(ValueKey('mc-session-model-$none')), findsNothing, reason: '$none names no model');
+      }
       for (final child in ['s-2', 's-3', 's-4']) {
         expect(find.descendant(of: parent, matching: find.byKey(ValueKey('mc-node-$child'))), findsOneWidget,
             reason: '$child is under its parent');

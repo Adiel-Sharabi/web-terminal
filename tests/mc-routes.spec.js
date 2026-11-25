@@ -60,7 +60,7 @@ test.describe('#502/#503 Mission Control routes', () => {
   test('every new route needs auth', async () => {
     const ctx = await noAuthCtx();
     for (const url of ['/api/work-items/acme%2Fwidgets%2342/meta', '/api/work-items/meta?refs=ado%3A1', '/api/mc/projects',
-      '/api/mc/subjects', '/api/mc/subjects/ado%3A1', '/api/mc/machines', '/api/mc/lines']) {
+      '/api/mc/subjects', '/api/mc/subjects/ado%3A1', '/api/mc/machines', '/api/mc/models', '/api/mc/lines']) {
       const r = await ctx.get(url, { maxRedirects: 0 });
       expect(r.status(), url).toBe(401);
     }
@@ -463,6 +463,123 @@ test.describe('#502/#503 Mission Control routes', () => {
     });
   });
 
+  test('start work (#533): the kind of work picks the model; it is in the launch command, the brief, the session row and Mission Control', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-mc-model-'));
+    const projects = [{ id: 'widgets', name: 'Widgets', match: { repos: ['acme/widgets'], paths: [dir] } }];
+    // `./claude` stands in for the agent (the suite never launches one): the flag needs a claude call to go in.
+    await withConfig({ projects, mc: { ado: { org: 'fakeorg' }, startCommand: './claude' } }, async () => {
+      const ctx = await authCtx();
+      const made = [];
+      try {
+        const cat = await ctx.get('/api/mc/models');
+        expect(cat.status()).toBe(200);
+        const c = await cat.json();
+        expect(c.kinds.map((k) => [k.id, k.model])).toEqual([['fix', 'sonnet'], ['run', 'sonnet'], ['lookup', 'haiku'], ['design', null]]);
+        expect(c.defaults).toEqual({ subjects: 'fix', hunt: 'design' });
+        expect(c.models.map((m) => m.id)).toEqual(['default', 'sonnet', 'haiku']);
+        const mv = await (await ctx.get('/api/mc/machines')).json();
+        const here = mv.suggested;
+        let seq = 0;
+        const start = async (extra) => {
+          // A name of its own each time: the create route refuses the same name and folder within 2 s.
+          const r = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: here, name: `M533 start ${++seq}`, ...extra } });
+          const body = await r.json();
+          if (body.sessionId) made.push(body.sessionId);
+          return { status: r.status(), body };
+        };
+        const rowOf = async (id) => (await (await ctx.get('/api/sessions')).json()).find((x) => x.id === id);
+
+        // A routine fix: sonnet, in the command, the brief and the row. The answer names the model of the command typed.
+        const fix = await start({ kind: 'fix', brief: 'Keep it small' });
+        expect(fix.status, JSON.stringify(fix.body)).toBe(200);
+        expect(fix.body).toMatchObject({ model: 'sonnet', kind: 'fix' });
+        const fixRow = await rowOf(fix.body.sessionId);
+        expect(fixRow.model).toBe('sonnet');
+        expect(fixRow.autoCommand.startsWith('./claude --model sonnet "Fix acme/widgets#42')).toBe(true);
+        expect(fixRow.autoCommand.endsWith('Model: sonnet for a routine fix or small feature (the suggested model for this kind of work). Keep it small"')).toBe(true);
+
+        // The cluster list (what the companion and Mission Control read) carries the same field.
+        const clusterRow = ((await (await ctx.get('/api/cluster/sessions')).json()).sessions || []).find((x) => x.id === fix.body.sessionId);
+        expect(clusterRow.model).toBe('sonnet');
+
+        // Mission Control: the session on its subject names it.
+        let ref = null;
+        for (let i = 0; i < 20 && !ref; i++) {
+          if (i) await sleep(300);
+          const sj = (await (await ctx.get('/api/mc/subjects/acme%2Fwidgets%2342')).json()).subject;
+          ref = sj && sj.sessions.find((x) => x.id === fix.body.sessionId);
+        }
+        expect(ref).toMatchObject({ bound: true, model: 'sonnet' });
+
+        // Design-heavy: the default model, no flag. An override is the person's, and says so.
+        const design = await start({ kind: 'design' });
+        expect(design.body).toMatchObject({ model: null, kind: 'design' });
+        const designRow = await rowOf(design.body.sessionId);
+        expect(designRow.model).toBeNull();
+        expect(designRow.autoCommand).not.toContain('--model');
+        expect(designRow.autoCommand).toContain('Model: the default model for design, ambiguous or security work');
+        const over = await start({ kind: 'fix', model: 'haiku' });
+        expect(over.body).toMatchObject({ model: 'haiku', kind: 'fix' });
+        expect((await rowOf(over.body.sessionId)).autoCommand).toContain('(chosen when it was started; the suggested model for this kind is sonnet)');
+
+        // No choice: as before the picker - no flag, nothing added to the brief, the row says null.
+        const plain = await start({});
+        expect(plain.body).toMatchObject({ model: null, kind: null });
+        const plainRow = await rowOf(plain.body.sessionId);
+        expect(plainRow.model).toBeNull();
+        // (the tracker title in the parentheses is there or not, as the cache stands)
+        expect(plainRow.autoCommand).toMatch(/^\.\/claude "Fix acme\/widgets#42( \([^)]*\))? in project Widgets\."$/);
+
+        // A kind or model that is not one is a 400 and creates nothing.
+        const before = (await (await ctx.get('/api/sessions')).json()).length;
+        for (const [extra, words] of [[{ kind: 'nope' }, 'kind must be one of'], [{ model: 'sonnet; calc' }, 'model must be default or a model name']]) {
+          const r = await start(extra);
+          expect(r.status, JSON.stringify(extra)).toBe(400);
+          expect(r.body.error).toContain(words);
+        }
+        expect((await (await ctx.get('/api/sessions')).json()).length).toBe(before);
+      } finally {
+        for (const id of made) await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+        await ctx.dispose();
+        try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a closing shell can still hold it */ }
+      }
+    });
+  });
+
+
+  test('GET /api/mc/models says whether the start command can take --model (#533): the picker is drawn only when it can', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'wt-mc-placeable-'));
+    const projects = [{ id: 'widgets', name: 'Widgets', match: { repos: ['acme/widgets'], paths: [dir] } }];
+    const BS = String.fromCharCode(92);
+    // bash reads the backslashes of a Windows path as escapes, so --model cannot be placed in it.
+    const winClaude = `C:${BS}tools${BS}claude.exe --dangerously-skip-permissions`;
+    try {
+      for (const [startCommand, placeable] of [['./claude', true], ['claude --dangerously-skip-permissions', true], [winClaude, false], ['codex --full-auto', false], ['echo', false]]) {
+        await withConfig({ projects, mc: { ado: { org: 'fakeorg' }, startCommand } }, async () => {
+          const ctx = await authCtx();
+          try {
+            const r = await ctx.get('/api/mc/models');
+            expect(r.status(), startCommand).toBe(200);
+            expect((await r.json()).modelPlaceable, startCommand).toBe(placeable);
+            if (!placeable) {
+              // What the flag spares a client: naming a model on such a command is a 400 that starts nothing.
+              const before = (await (await ctx.get('/api/sessions')).json()).length;
+              const here = (await (await ctx.get('/api/mc/machines')).json()).suggested;
+              const bad = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: here, name: 'M533 placeable', kind: 'fix' } });
+              expect(bad.status(), startCommand).toBe(400);
+              expect((await bad.json()).error).toMatch(/--model|claude/);
+              expect((await (await ctx.get('/api/sessions')).json()).length).toBe(before);
+            }
+          } finally {
+            await ctx.dispose();
+          }
+        });
+      }
+    } finally {
+      try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* a closing shell can still hold it */ }
+    }
+  });
+
   test('start work on a PEER (#512): forwarded to its POST /api/sessions with the stored token; its refusals mapped; its hold read', async () => {
     const PEER = 'http://127.0.0.1:17689';
     const TOKEN = 'mc512-fake-peer-token';
@@ -524,6 +641,27 @@ test.describe('#502/#503 Mission Control routes', () => {
             ref = sj && sj.sessions.find((x) => x.id === started.sessionId);
           }
           expect(ref).toMatchObject({ server: 'fakepeer', serverUrl: PEER, bound: true });
+
+          // #533 - the model is placed in the command HERE, so a peer of ANY version starts with it: what the peer is
+          // sent is the finished command and no `model` field (an older server would ignore one, silently).
+          await withConfig({ mc: { ado: { org: 'fakeorg' }, startCommand: './claude' } }, async () => {
+            const sent = peer.seen.length;
+            const m = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: 'fakepeer', kind: 'lookup' } });
+            expect(m.status(), await m.text()).toBe(200);
+            expect(await m.json()).toMatchObject({ server: 'fakepeer', model: 'haiku', kind: 'lookup' });
+            const body = peer.seen[sent].body;
+            expect(body.autoCommand.startsWith('./claude --model haiku "Fix acme/widgets#42')).toBe(true);
+            expect(body.autoCommand).toContain('Model: haiku for a lookup, status check or build (the suggested model for this kind of work).');
+            expect(body).not.toHaveProperty('model');
+            // A command that cannot take the flag is refused before the peer is asked.
+            await withConfig({ mc: { ado: { org: 'fakeorg' }, startCommand: 'echo' } }, async () => {
+              const before = peer.seen.length;
+              const bad = await ctx.post('/api/mc/start', { data: { project: 'widgets', subjects: ['#42'], server: 'fakepeer', kind: 'fix' } });
+              expect(bad.status()).toBe(400);
+              expect((await bad.json()).error).toMatch(/only for claude/);
+              expect(peer.seen.length).toBe(before);
+            });
+          });
 
           // A peer's refusal keeps its code; its 401 (our token) is a 502, never the caller's 401.
           for (const [next, code, words] of [['refuse', 400, 'fakepeer: Folder does not exist'], ['unauth', 502, 'fakepeer: Unauthorized'],
