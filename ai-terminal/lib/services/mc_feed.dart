@@ -72,6 +72,15 @@ String? _place(String? url) {
   return '${u.scheme.toLowerCase()}://${u.host.toLowerCase()}:$port$path';
 }
 
+/// #550 - an answer that went out to a card's session, from wherever in the app it was typed: the
+/// card, the answer sheet, the ask dialog. [seq] tells one answer from the next; [shown] is what
+/// the card's "Answered" row says (the option's label or the person's words; null: keys were typed).
+class McSent {
+  const McSent(this.seq, this.shown);
+  final int seq;
+  final String? shown;
+}
+
 class McFeed extends ChangeNotifier {
   McFeed({
     required this.servers,
@@ -100,6 +109,11 @@ class McFeed extends ChangeNotifier {
   bool _active = false;
   bool _disposed = false;
   Timer? _timer;
+  Timer? _hurryTimer;
+
+  /// #550 - bumped when the person asks to see the latest list (see [seenEpoch]).
+  int _seenEpoch = 0;
+  bool _showWanted = false;
 
   McStatus get status => _status;
 
@@ -115,6 +129,36 @@ class McFeed extends ChangeNotifier {
   /// When [now] was received.
   DateTime? get receivedAt => _at;
 
+  /// #550 - changes whenever the person asks to see what is there NOW: pull-to-refresh, the Refresh
+  /// button, the "N new" pill, coming back to Mission Control. Between two changes the Now screen
+  /// holds back the cards that arrived since it last showed the list, so the one the person is
+  /// working on never moves because another one popped up.
+  int get seenEpoch => _seenEpoch;
+
+  /// #550 - the answers that went out to cards the server still lists, by card id.
+  final Map<String, McSent> _sent = {};
+  int _sentSeq = 0;
+
+  /// The latest answer that went out for card [id] and that the server still lists; null: none.
+  McSent? sentFor(String id) => _sent[id];
+
+  /// #550 - an answer to [card] went out. Every card that lists it folds into its "Answered" row at
+  /// once (not only the one the answer was typed on), and Now is read again every couple of seconds
+  /// ([hurry]): the card leaves the server's list long before the next poll.
+  void answerWentOut(McCard card, {String? shown}) {
+    if (_disposed) return;
+    _sent[card.id] = McSent(++_sentSeq, shown);
+    notifyListeners();
+    hurry();
+  }
+
+  /// #550 - the person asks to see the latest list: the cards held back are shown. No network.
+  void showLatest() {
+    if (_disposed) return;
+    _seenEpoch++;
+    notifyListeners();
+  }
+
   /// Polls while true. Mission Control turns it on while it is the home on screen.
   bool get active => _active;
   set active(bool on) {
@@ -122,7 +166,10 @@ class McFeed extends ChangeNotifier {
     _active = on;
     _timer?.cancel();
     _timer = null;
+    if (!on) _stopHurry();
     if (on) {
+      // Coming back to Mission Control shows the latest list (#550).
+      _showWanted = true;
       unawaited(refresh());
       _timer = Timer.periodic(pollInterval, (_) {
         if (isForeground?.call() ?? true) unawaited(refresh());
@@ -132,8 +179,12 @@ class McFeed extends ChangeNotifier {
 
   /// Asks the servers again (see the file header). One ask at a time; an ask made while
   /// one is out (after a to-do or a Later, say) runs once it is back, never dropped.
-  Future<void> refresh() async {
+  /// [show]: the person asked to see the latest list (#550): once an answer that was asked for
+  /// AFTER this call arrives, [seenEpoch] changes with it, so the Now screen merges in the cards
+  /// it held back. A poll or an action's follow-up passes none.
+  Future<void> refresh({bool show = false}) async {
     if (_disposed) return;
+    if (show) _showWanted = true;
     if (_asking) {
       _again = true;
       return;
@@ -142,12 +193,40 @@ class McFeed extends ChangeNotifier {
     try {
       do {
         _again = false;
+        final showThis = _showWanted;
+        _showWanted = false;
         await _ask();
+        if (showThis) _seenEpoch++;
         if (!_disposed) notifyListeners();
       } while (_again && !_disposed);
     } finally {
       _asking = false;
     }
+  }
+
+  /// #550 - an answer just went out: the card it answers leaves the server's list within a few
+  /// seconds (the session's server clears it in well under one, then Mission Control's server
+  /// re-reads the cluster), but the next poll is up to [pollInterval] away. Asks again every
+  /// [every] for [span] (longer than the card's grace, so a card still listed then is read as not
+  /// taken), then the usual poll resumes. A second call restarts the window.
+  void hurry({Duration every = const Duration(seconds: 2), Duration span = const Duration(seconds: 24)}) {
+    if (_disposed || !_active) return;
+    _stopHurry();
+    final ticks = span.inMilliseconds ~/ every.inMilliseconds;
+    _hurryTimer = Timer.periodic(every, (t) {
+      if (_disposed || !_active || t.tick > ticks) {
+        t.cancel();
+        if (identical(_hurryTimer, t)) _hurryTimer = null;
+        return;
+      }
+      if (isForeground?.call() ?? true) unawaited(refresh());
+    });
+    unawaited(refresh());
+  }
+
+  void _stopHurry() {
+    _hurryTimer?.cancel();
+    _hurryTimer = null;
   }
 
   Future<void> _ask() async {
@@ -176,6 +255,8 @@ class McFeed extends ChangeNotifier {
         final now = await client(sv).mcNow();
         _now = now;
         _at = DateTime.now();
+        // An answer for a card the server no longer lists has done its work.
+        _sent.removeWhere((id, _) => !now.answerNow.any((c) => c.id == id));
         _set(McStatus.ok, now, sv, null);
         return true;
       } on McPeerException catch (e) {
@@ -392,6 +473,7 @@ class McFeed extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _timer?.cancel();
+    _stopHurry();
     super.dispose();
   }
 }
