@@ -242,6 +242,41 @@ test.describe('#502/#503 Mission Control routes', () => {
     }
   });
 
+  test('a wait that names no item shows once (#546): the subjects carry none of it, /api/mc/subjects carries it once, the line counts it once', async () => {
+    const ctx = await authCtx();
+    const stamp = Date.now();
+    const lineName = `wait-line-${stamp}`;
+    const keys = ['ado:9101', 'ado:9102', 'ado:9103'];
+    const made = await ctx.post('/api/sessions', { data: { name: `mc-wait-${stamp}`, autoCommand: '' } });
+    expect(made.status()).toBe(200);
+    const id = (await made.json()).id;
+    try {
+      const c = await pwRequest.newContext({ baseURL: BASE });
+      const rep = await c.post(`/api/session/${id}/report`, { headers: { 'X-WT-Hook-Token': readHookToken() }, data: {
+        items: keys.map((k) => ({ ref: k, state: 'in-progress', stage: 'fixing' })), line: lineName,
+        wait: { on: 'you', what: 'OK for one re-run?' } } });
+      expect(rep.status()).toBe(200);
+      await c.dispose();
+      let body = null;
+      for (let i = 0; i < 40; i++) {
+        if (i) await sleep(300);
+        body = await (await ctx.get(`/api/mc/subjects?line=${encodeURIComponent(`other/~wait-line-${stamp}`)}`)).json();
+        if (body.waits && body.waits.length) break;
+      }
+      expect(body.subjects.map((x) => x.key).sort()).toEqual(keys);
+      for (const x of body.subjects) { expect(x.needsYou, x.key).toBeNull(); expect(x.waitsOn, x.key).not.toBe('you'); }
+      expect(body.waits).toHaveLength(1);
+      expect(body.waits[0].card).toMatchObject({ kind: 'wait', sessionId: id, what: 'OK for one re-run?', subjectKey: null });
+      expect(body.waits[0].subjects.slice().sort()).toEqual(keys);
+      const lines = await (await ctx.get('/api/mc/lines')).json();
+      const line = lines.lines.find((l) => l.id === `other/~wait-line-${stamp}`);
+      expect(line.counts).toMatchObject({ needsYou: 1, active: 3 });
+    } finally {
+      await ctx.delete(`/api/sessions/${id}`).catch(() => {});
+      await ctx.dispose();
+    }
+  });
+
   test('lines (#523): a reported line groups the item; Move to line wins and null hands it back; a closed session keeps its line', async () => {
     const ctx = await authCtx();
     const key = 'ado:9001';

@@ -684,20 +684,23 @@ test.describe('#547 a wait answered in another session is marked "maybe answered
     const screens = (rows) => {
       const nodes = M.sessionNodes({ rows, closed: [], now: NOW });
       const view = M.buildView({ nodes, metaByKey: {}, projects, now: NOW, platform: 'win32' });
-      return { card: parentCard(rows), on: (key) => view.subjects.find((s) => s.key === key).needsYou };
+      return { view, card: parentCard(rows), on: (key) => view.subjects.find((s) => s.key === key).needsYou };
     };
-    // Two items and a wait that names none: its descendants only, on every screen.
+    // Two items and a wait that names none: its descendants only, on every screen. #546: no item shows
+    // it - the view carries it once (`waits`), marked as Answer now marks it.
     const bare = parentRow({ items: [ITEM, OTHER], wait: { on: 'you', what: 'which colour?', at: WAIT_AT } });
     const s1 = screens([bare, b]);
     expect(s1.card.answeredIn).toBeUndefined();
-    expect(s1.on('ado:8001').answeredIn).toBeUndefined();
-    expect(s1.on('ado:8002').answeredIn).toBeUndefined();
-    // The wait names ado:8001: b is on it, so the card is marked - on Answer now and under BOTH subjects.
+    expect(s1.on('ado:8001')).toBeNull();
+    expect(s1.on('ado:8002')).toBeNull();
+    expect(s1.view.waits).toHaveLength(1);
+    expect(s1.view.waits[0].card.answeredIn).toBeUndefined();
+    // The wait names ado:8001: b is on it, so the card is marked - on Answer now and under that subject only (#546).
     const named = parentRow({ items: [ITEM, OTHER] });
     const s2 = screens([named, b]);
     expect(s2.card.answeredIn).toMatchObject({ sessionId: b.id });
     expect(s2.on('ado:8001').answeredIn).toMatchObject({ sessionId: b.id });
-    expect(s2.on('ado:8002').answeredIn).toMatchObject({ sessionId: b.id });
+    expect(s2.on('ado:8002')).toBeNull();
     // A wait that names nothing, from a session holding ONE real item: that item is the pool, on both.
     const one = parentRow({ items: [ITEM], wait: { on: 'you', what: 'which colour?', at: WAIT_AT } });
     const s3 = screens([one, b]);

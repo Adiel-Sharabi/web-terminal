@@ -122,6 +122,8 @@ Counts = { active, needsYou, waitsOnOthers, doneWeek, sessions,
 the session itself: a `path` rule, or a project with `source: 'none'`, all in `General`). The other
 four count SUBJECTS (#504) by their `buckets` (one rule, `lib/mc-subjects.js` `bucketsOf`, so a
 screen filtering subjects by bucket gets the server's number), toward the subject's project and area.
+`needsYou` also counts, once, each wait on the person that names no item of its session (#546, `waits`
+of Subjects below; `countWait`): the one count a bucket filter does not list, the page shows that wait above its items.
 `stages` (#505, ordered, every stage present): subjects by `stage.current`; a subject with no stage
 is in none. An area a subject landed in that `map` does not name (an ADO Area Path's last segment)
 is listed after the mapped ones, before `General`.
@@ -155,7 +157,7 @@ Stage = { current, reported, evidence, history: [{stage, at, source:'report'|'pr
 tracker proves now (null when nothing, or unread). All null for a subject nobody staged.
 
 ## Subjects (#504) - `lib/mc-subjects.js`
-`GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], servers: [{name, ok}], stages: [id], generatedAt}`
+`GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], waits: [{card: Card, subjects: [key]}], servers: [{name, ok}], stages: [id], generatedAt}`
 `GET /api/mc/subjects/:key` -> `{subject: Subject, runs: [Run], stages: [id], generatedAt}` (404 when unknown)
 
 `project` = a project id; `area` = an area id as `/api/mc/projects` names it, or (when no area has that id) its name, no case;
@@ -211,6 +213,19 @@ self, menu -> nothing (a peer too old to send `reason`: status `waiting` -> you,
 else its reported wait). The subject takes the first of you, external, self, done that any session
 gives. Buckets: `doneWeek` when `meta.closed` or waitsOn is done, else `active`; plus `needsYou`
 when waitsOn is you, `waitsOnOthers` when external - the companion's fallback rule exactly.
+
+**A session's wait on you is ONE fact (#546).** A session on five items that waits on you used to
+mark all five (and count five). Now the wait is on the item `lib/mc-subjects.js` `waitSubjectFor`
+names - `subjectFor`, the rule Answer now uses for the same card (#541, #548): the item its `ref`
+names, else its only real item, else the one it reports `blocked`, else the one its words are
+about - and ONLY there: that subject carries `needsYou`, `waitsOn: 'you'` and the `needsYou`
+bucket; the session's other items carry none of it and keep only their own stage. A wait that
+resolves to no item (or to an item the session reported done) is in no subject: it is one entry of
+the answer's `waits`, `{card, subjects}` - the card (`subjectKey`, `ref`, `title` null) and the
+keys of the items that session's wait used to mark. `GET /api/mc/subjects` carries `waits`
+(filtered as the subjects are: the waits that cover any subject kept; an older server sends none),
+and a page shows each once, above its items. Counts: such a wait counts `needsYou` once per
+project, area and line its items are in (`lib/projects.js` `countWait`), never once per item.
 
 ## Answer now / My to-do (#506) - `lib/mc-needs.js`
 `GET /api/mc/now` -> `{answerNow: [Card], actions: [Card], todo: [Todo], moving: {working, idle, total}, projects: [Project], generatedAt}`

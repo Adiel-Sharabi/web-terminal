@@ -291,34 +291,11 @@ class _McSubjectScreenState extends State<McSubjectScreen> {
                     ]),
                   ],
                   const SizedBox(height: 12),
-                  // #522: a thing to DO is never shown as a question.
-                  if (s.needsYou != null && s.needsYou!.isAction) ...[
-                    mcSectionTitle(context, 'To do'),
-                    McActionCard(
-                      key: ValueKey('mc-action-${s.needsYou!.id}'),
-                      card: s.needsYou!,
-                      now: widget.now,
-                      onDone: () => mcRun(context, () => widget.feed.actionDone(s.needsYou!)),
-                      onLater: (h) => mcRun(context, () => widget.feed.later(s.needsYou!, h)),
-                      onOpenSession: s.needsYou!.sessionId == null
-                          ? null
-                          : () => widget.onOpenSession(s.needsYou!.sessionId!),
-                    ),
-                    const SizedBox(height: 16),
-                  ] else if (s.needsYou != null) ...[
-                    mcSectionTitle(context, 'Open question'),
-                    McAnswerCard(
-                      key: ValueKey('mc-card-${s.needsYou!.id}'),
-                      card: s.needsYou!,
-                      now: widget.now,
-                      onAnswer: () => widget.onAnswer(s.needsYou!),
-                      onOpenSession: s.needsYou!.sessionId == null
-                          ? null
-                          : () => widget.onOpenSession(s.needsYou!.sessionId!),
-                      onLater: (h) => mcRun(context, () => widget.feed.later(s.needsYou!, h)),
-                      onTodo: () => mcRun(context, () => widget.feed.addTodo(s.needsYou!)),
-                      onTell: s.needsYou!.answeredIn == null ? null : () => mcRun(context, () => widget.feed.tellAnswered(s.needsYou!)),
-                    ),
+                  // #522: a thing to DO is never shown as a question (mcWaitCard).
+                  if (s.needsYou != null) ...[
+                    mcSectionTitle(context, s.needsYou!.isAction ? 'To do' : 'Open question'),
+                    mcWaitCard(context, widget.feed, s.needsYou!,
+                        onAnswer: widget.onAnswer, onOpenSession: widget.onOpenSession, now: widget.now),
                     const SizedBox(height: 16),
                   ],
                   mcSectionTitle(context, 'Progress'),

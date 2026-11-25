@@ -236,6 +236,62 @@ Future<void> mcRun(BuildContext context, Future<String?> Function() action) asyn
   }
 }
 
+/// #546 - the card of one wait on the person as a work item's page, or the banner of a line or
+/// project page, offers it: a thing to DO (#522) is an action card, never phrased as a question;
+/// anything else is answered in place. ONE builder for the subject screen and the banner.
+Widget mcWaitCard(BuildContext context, McFeed feed, McCard card,
+    {required void Function(McCard card) onAnswer, required void Function(String sessionId) onOpenSession, DateTime? now}) {
+  final sessionId = card.sessionId;
+  final open = sessionId == null ? null : () => onOpenSession(sessionId);
+  if (card.isAction) {
+    return McActionCard(
+      key: ValueKey('mc-action-${card.id}'),
+      card: card,
+      now: now,
+      onDone: () => mcRun(context, () => feed.actionDone(card)),
+      onLater: (h) => mcRun(context, () => feed.later(card, h)),
+      onOpenSession: open,
+    );
+  }
+  return McAnswerCard(
+    key: ValueKey('mc-card-${card.id}'),
+    card: card,
+    now: now,
+    onAnswer: () => onAnswer(card),
+    onOpenSession: open,
+    onLater: (h) => mcRun(context, () => feed.later(card, h)),
+    onTodo: () => mcRun(context, () => feed.addTodo(card)),
+    onTell: card.answeredIn == null ? null : () => mcRun(context, () => feed.tellAnswered(card)),
+  );
+}
+
+/// #546 - the waits of [data] that name no work item of their session, each ONCE above the items
+/// (never on every item it covers: five items of one session all said the same line). Empty when
+/// there are none.
+List<Widget> mcWaitBanners(BuildContext context, McFeed feed, McSubjects data,
+    {required void Function(McCard card) onAnswer, required void Function(String sessionId) onOpenSession, DateTime? now}) {
+  if (data.waits.isEmpty) return const [];
+  final muted = Theme.of(context).textTheme.bodySmall?.copyWith(color: AppColors.onSurfaceVariant);
+  return [
+    mcSectionTitle(context, 'Waiting on you', key: const ValueKey('mc-waits-title')),
+    for (final w in data.waits)
+      Padding(
+        key: ValueKey('mc-wait-${w.card.id}'),
+        padding: const EdgeInsets.only(bottom: 8),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+          mcWaitCard(context, feed, w.card, onAnswer: onAnswer, onOpenSession: onOpenSession, now: now),
+          if (w.card.subjectKey == null && w.subjects.length > 1)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(4, 4, 4, 0),
+              child: Text('It names none of the ${w.subjects.length} items it covers here.',
+                  key: const ValueKey('mc-wait-covers'), style: muted),
+            ),
+        ]),
+      ),
+    const SizedBox(height: 8),
+  ];
+}
+
 /// How long after a change above it the card in use is held where it was: the collapse of an
 /// answered card above it runs for [kMcCollapse], and a little more is left for the frame it ends in.
 const Duration kMcAnchorSpan = Duration(milliseconds: 450);

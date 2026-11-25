@@ -882,6 +882,11 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   `config.json` `projects[].lines` (listed items, tags, title prefixes, session-name patterns); then
   its tracker parent Feature/Epic; else a line of its own (its run, or the item) - never a
   catch-all. `GET /api/mc/lines`, `POST /api/mc/lines/move`, `?line=` on `/api/mc/subjects`.
+- **A session's wait shows once (#546):** a session on five work items that waits on you used to put
+  the same "waits on you" line on all five (and count five). The wait is now on the one item it
+  names (its `ref`, its only item, the one it reports blocked, or the one its words are about);
+  with none it is one card at the top of the line or project page ("Waiting on you"), counted once
+  per line, project and area (`waits` on `GET /api/mc/subjects`). Each item keeps only its own stage.
 - **Questions with context on demand (#510):** **More context** on an Answer-now card (Now, a
   subject) opens it at three levels - **Just the ask** (and the recommendation), **Context** (the
   work item, what the session did, what each answer does, the inbox digest when one is cached) and

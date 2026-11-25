@@ -1064,12 +1064,17 @@ class McServerState {
 class McSubjects {
   final List<McSubject> subjects;
   final List<McRun> runs;
+
+  /// #546 - the waits on the person that name no item of their session, each once (empty from an
+  /// older server, whose subjects each carry the same card).
+  final List<McCoveringWait> waits;
   final List<McServerState> servers;
   final DateTime? generatedAt;
 
   const McSubjects({
     this.subjects = const [],
     this.runs = const [],
+    this.waits = const [],
     this.servers = const [],
     this.generatedAt,
   });
@@ -1079,9 +1084,24 @@ class McSubjects {
     return McSubjects(
       subjects: _firstOf(_list(m['subjects'], McSubject.fromJson), (s) => s.key),
       runs: _firstOf(_list(m['runs'], McRun.fromJson), (r) => r.id),
+      waits: _firstOf(_list(m['waits'], McCoveringWait.fromJson), (w) => w.card.id),
       servers: _list(m['servers'], McServerState.fromJson),
       generatedAt: _at(m['generatedAt']),
     );
+  }
+}
+
+/// #546 - one wait of a session that names no work item (`GET /api/mc/subjects` `waits`): the
+/// card, and the keys of the items it covers. A page shows it ONCE, above its items.
+class McCoveringWait {
+  final McCard card;
+  final List<String> subjects;
+  const McCoveringWait({required this.card, this.subjects = const []});
+
+  static McCoveringWait? fromJson(dynamic json) {
+    final m = _map(json);
+    final card = McCard.fromJson(m['card']);
+    return card == null ? null : McCoveringWait(card: card, subjects: _strings(m['subjects']));
   }
 }
 
