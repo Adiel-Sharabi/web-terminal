@@ -227,6 +227,19 @@ test.describe('#531 question card face and the last turns', () => {
     expect(s && s.needsYou && s.needsYou.questions).toEqual(QUESTIONS.map((q) => ({ header: q.header, text: q.question })));
   });
 
+  test('#546 a question that names no item is the card at the top of the page: it carries its questions too', async () => {
+    await report(id, { items: [{ ref: 'acme/widgets#541', title: 'Alpha thing', state: 'in-progress' }, { ref: 'acme/widgets#542', title: 'Beta thing', state: 'in-progress' }] });
+    let w = null;
+    for (let i = 0; i < 40 && !(w && w.card.questions); i++) {
+      if (i) await sleep(300);
+      const body = await (await ctx.get('/api/mc/subjects')).json();
+      w = (body.waits || []).find((x) => x.card.sessionId === id) || null;
+    }
+    expect(w && w.card).toMatchObject({ kind: 'question', subjectKey: null });
+    expect(w.card.questions).toEqual(QUESTIONS.map((q) => ({ header: q.header, text: q.question })));
+    expect(w.subjects.slice().sort()).toEqual(['acme/widgets#541', 'acme/widgets#542']);
+  });
+
   test("a follow-up's bundle holds the session's last turns, inside the fence", async () => {
     resetFake();
     const r = await ctx.post(`/api/mc/questions/${enc()}/followup`, { data: { question: 'What does Federator do?' } });
