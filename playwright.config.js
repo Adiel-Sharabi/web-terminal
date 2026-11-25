@@ -137,6 +137,13 @@ process.env.WT_INBOX_DIGEST_TIMEOUT_MS = '4000';
 process.env.WT_MC_ANALYST_COMMAND = JSON.stringify([process.execPath, path.join(__dirname, 'tests', 'fixtures', 'fake-analyst-cli.js')]);
 process.env.FAKE_ANALYST_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'analyst-fake');
 process.env.WT_MC_ANALYST_TIMEOUT_MS = '4000';
+// #540 - the check-in's pre-check runs `claude -p` too: a fake CLI (tests/fixtures/fake-precheck-cli.js), recording
+// into FAKE_PRECHECK_DIR and answering as that directory's mode.json says (default: wake, which is what a check-in
+// did before). The usage ledger the server appends its decisions to is a file of its own - never the real one.
+process.env.WT_CHECKIN_PRECHECK_COMMAND = JSON.stringify([process.execPath, path.join(__dirname, 'tests', 'fixtures', 'fake-precheck-cli.js')]);
+process.env.FAKE_PRECHECK_DIR = path.join(require('./scripts/scratch-dirs').DIRS.tests, 'precheck-fake');
+process.env.WT_CHECKIN_PRECHECK_TIMEOUT_MS = '4000';
+process.env.WT_USAGE_LEDGER_FILE = path.join(__dirname, 'handoffs.test', 'usage-ledger.test.jsonl');
 // One variable the digest child must NOT inherit by each scrub rule (exact name, WT_ prefix)
 // and one it must keep, so the route-level env assertion cannot pass on a server env that
 // holds none of them (CI's does not).
