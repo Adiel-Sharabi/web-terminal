@@ -528,10 +528,11 @@ test.describe('#541 a card shows the title of the item it is about - never the s
     expect(new Set(Object.values(c).map((x) => x.title)).size).toBe(3);
   });
 
-  test('an ask with no ref and no shared words never borrows the first item - one item or many', () => {
-    const one = row('alpha', { items: [A5], asks: [ask('Which colour for the badge?')] });
+  test('an ask with no ref and no shared words never borrows the first item of SEVERAL; the only item of a session is what its cards are about (#548)', () => {
     const many = row('alpha', { items: [A5, B9], asks: [ask('Which colour for the badge?')], ...youWait('Anything else?') });
-    for (const s of [one, many]) for (const c of nowOf([s]).answerNow) expect(face(c)).toEqual([null, null, null]);
+    for (const c of nowOf([many]).answerNow) expect(face(c)).toEqual([null, null, null]);
+    const one = row('alpha', { items: [A5], asks: [ask('Which colour for the badge?')] });
+    for (const c of nowOf([one]).answerNow) expect(face(c)).toEqual(['ado:5', 'ado:5', 'Landscape on a phone']);
   });
 
   test('a single shared word is not enough (the cost of a wrong title is higher than none), nor a tie between two items', () => {
@@ -553,7 +554,7 @@ test.describe('#541 a card shows the title of the item it is about - never the s
     expect(face(nowOf([real]).answerNow[0])[0]).toBe('ado:5');
   });
 
-  test('a session started on ONE item that has reported nothing yet: its cards are about that item (the person said so); once it reports, only a ref or words say', () => {
+  test('a session with ONE item - bound at birth or reported - has cards about that item; with two, only a ref or words say (#548)', () => {
     const bound = { key: 'ado:42', ref: 'ado:42', title: null, state: null, bound: true, boundAt: NOW - MIN };
     const node = { id: 'live-1', items: [bound] };
     const subj = { key: 'ado:42', ref: 'ado:42', title: 'Widgets login', project: 'widgets' };
@@ -563,8 +564,8 @@ test.describe('#541 a card shows the title of the item it is about - never the s
     // Two items (the session reported more, or was bound to two): never the first.
     const two = { id: 'live-1', items: [bound, { ...bound, key: 'ado:43', ref: 'ado:43' }] };
     expect(N.subjectFor(two, subjects, { words: 'Approve a tool' })).toBeNull();
-    // A reported item is not a binding.
-    expect(N.subjectFor({ id: 'live-1', items: [{ ...bound, bound: false, title: 'Other', state: 'in-progress' }] }, subjects, { words: 'Approve a tool' })).toBeNull();
+    // #548: one REPORTED item is just as much the session's only item as a binding is.
+    expect(N.subjectFor({ id: 'live-1', items: [{ ...bound, bound: false, title: 'Other', state: 'in-progress' }] }, subjects, { words: 'Approve a tool' })).toBe(subj);
   });
 
   test('a ref the session no longer reports gives no subject (not the first item, not a word match)', () => {

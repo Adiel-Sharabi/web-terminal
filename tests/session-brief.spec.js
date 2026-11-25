@@ -861,3 +861,38 @@ test.describe('#523 a session reports its line of work', () => {
     expect(B.validateReport({ items: [{ ref: '#1', state: 'done' }], line: 7 }).error).toContain('e.g. "Bug hunter"');
   });
 });
+
+test.describe('#548 a work item number starts at 1: `#0` names no item', () => {
+  // The report that made a subject nobody could open: an agent that had not filed its issue yet
+  // reported `owner/repo#0` as a placeholder (its card then listed a `.../issues/0` subject).
+  const ZERO = ['#0', 'gh#0', '0', 'ado:0', 'wi 0', 'owner/repo#0', 'Owner/Repo#00', 'gh:owner/repo#0'];
+
+  test('isUnfiledRef: every spelling of number 0, no other', () => {
+    for (const r of ZERO) expect(B.isUnfiledRef(r), r).toBe(true);
+    for (const r of ['#1', '#10', '#100', 'ado:10', 'ado:9001', 'owner/repo#10', 'owner/repo#1', 'free text', '']) expect(B.isUnfiledRef(r), r).toBe(false);
+    expect(B.isUnfiledRef(undefined)).toBe(false);
+    expect(B.isUnfiledRef(7)).toBe(false);
+  });
+
+  test('a report that lists one is refused in words, naming the item and what to do; pins too', () => {
+    for (const r of ZERO) {
+      const v = B.validateReport({ items: [{ ref: '#5', state: 'in-progress' }, { ref: r, state: 'in-progress', title: 'Not filed yet' }] });
+      expect(v.report, r).toBeUndefined();
+      expect(v.error, r).toContain('items[1].ref');
+      expect(v.error, r).toContain('numbers start at 1');
+    }
+    expect(B.validatePinned([{ ref: 'owner/repo#0' }]).error).toContain('numbers start at 1');
+    // Neighbours of zero are fine.
+    expect(B.validateReport({ items: [{ ref: 'owner/repo#10', state: 'done' }, { ref: 'ado:100', state: 'done' }] }).error).toBeUndefined();
+  });
+
+  test('one already stored is never published: the brief leaves it out (an older report may still hold it)', () => {
+    const items = [{ ref: 'ado:9001', title: 'Real', state: 'committed', note: '' }, { ref: 'Owner/Repo#0', title: 'Placeholder', state: 'in-progress', note: '' }];
+    const origin = { kind: 'github', owner: 'Owner', repo: 'Repo' };
+    // Built by hand: the validator would refuse it today, a stored report from before may not.
+    const e = { ...B.emptyEntry(), reported: { items, headline: 'h', at: T0 }, pinned: [{ ref: '#0', title: 'Pinned placeholder' }] };
+    const b = B.buildBrief(e, { reporting: true, origin });
+    expect(b.items.map((i) => i.ref)).toEqual(['ado:9001']);
+    expect(b.items.every((i) => !/#0$/.test(i.key))).toBe(true);
+  });
+});
