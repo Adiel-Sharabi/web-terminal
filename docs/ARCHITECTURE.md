@@ -132,7 +132,9 @@ The legacy proxy path is always available as fallback — direct mode is purely 
 | `claude-hook.js` / `claude-hook.sh` | Claude Code hook scripts (Node for Windows, bash elsewhere) |
 | `scripts/install-codex-notify.js` | Writes the three `[tui]` keys that enable Codex's OSC 9 status channel. Applied by `scripts/cold-restart.ps1` on every deploy; `--check` reports without changing anything |
 | `scripts/install-hooks.js` | Owns the Claude Code hook set in `~/.claude/settings.json` — the nine events the server consumes. Adds/corrects only web-terminal's own http entry, so user hooks survive; idempotent, so the deploy path applies it every time. The set had no owner in the repo until 2026-08-12, which is how `SessionStart` came to be missing on every machine |
-| `scripts/bump-server-version.js` | Bumps `SERVER_VERSION`, which lives on a ~280KB single line that no reviewer or agent should have to read to change three digits |
+| `scripts/bump-server-version.js` | The maintainer's release tool: sets the `SERVER_VERSION` literal and nothing else. A change does not bump it; a build is named by `hash` + `date` on `/api/version` |
+| `scripts/wt-build.js` | Says which build a server is running and proves a reload took a given commit (`--head`, `--expect <hash>`, or a peer name) |
+| `lib/build-id.js` | The build identity (commit hash + date) read once at start, and the rule for "same build" |
 
 ### Frontend
 

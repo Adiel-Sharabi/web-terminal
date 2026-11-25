@@ -83,7 +83,7 @@ body:
     attributes:
       label: Server version
       description: |
-        Check the footer of the web UI, or call `GET /api/version` (visible as `SERVER_VERSION` in the response).
+        Check the footer of the web UI, or call `GET /api/version` and give `version`, `hash` and `date` from the response (the hash and date name the exact build).
       placeholder: "e.g. 1.14.6"
     validations:
       required: true

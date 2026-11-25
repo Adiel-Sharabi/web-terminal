@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 'use strict';
-// Bump SERVER_VERSION in server.js.
+// Bump SERVER_VERSION in server.js - the OWNER's release tool.
 //
-// Why a script for a one-line edit: SERVER_VERSION sits on a ~280KB SINGLE line, so
-// every hand-editing route (read the file, diff it, sed it interactively) either drowns
-// a reviewer or an agent's context in one unreadable line. This touches the version
-// literal and nothing else.
+// A change never runs this: builds are named by the commit hash + date that /api/version
+// serves (lib/build-id.js), and the release number moves only when the owner cuts a release.
+// Why a script for a one-line edit: it touches the version literal and nothing else, so
+// nobody has to open server.js to change three digits.
 //
 //   node scripts/bump-server-version.js            # patch bump
 //   node scripts/bump-server-version.js minor
