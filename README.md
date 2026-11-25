@@ -814,6 +814,11 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   details), capped in size, and it never types into a session. In the companion: the **Ask** tab
   on a phone, the **Ask** panel beside any tab on desktop; each source opens its session or link.
   Config `mcAnalyst` (`enabled`, `model`, `command`, `timeoutMs`) in `config.json` only.
+- **Usage ledger (#529):** where the weekly Claude limit went. `GET /api/usage-ledger` (`?cluster=1` merges the other
+  machines; a peer too old for it is skipped, not an error) reads the files `usage-monitor.js` keeps under `~/.claude`
+  (followed incrementally, never read whole per request) and answers the weekly totals, the sessions that burned the most
+  and why each is big (cold cache writes, a huge context re-read every turn, a long run, check-in wakes), all in weighted
+  cost units, an estimate. The companion's Mission Control has a **Usage** tab; a row opens its session while it exists.
 - **Start work (#512):** one entry point in the companion's Mission Control (Now, Projects and each
   project's page): pick a project, then work items (or a bug hunt with no list), then a machine (the
   least-loaded healthy one is suggested by `GET /api/mc/machines`). `POST /api/mc/start` creates the
