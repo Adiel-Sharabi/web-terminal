@@ -357,3 +357,117 @@ test.describe('#548 a `#0` item is never a subject (a peer\'s row is data)', () 
     expect(M.waitItemKey(n)).toBeNull();
   });
 });
+
+// #546 - a session's wait is ONE fact. The owner's case (S25, Lines > "Migdal (2)"): one session on
+// five work items, one wait with no `ref`: all five items said "waits on you: ..." (and the line
+// counted five that need you). Now the wait is on the item it names (or the #541 match), else shown
+// ONCE for the work it covers (`view.waits`), and counted once.
+test.describe('#546 a wait shows once: on its item, else once for the line', () => {
+  const L = require('../lib/mc-lines');
+  const OWNER_WAIT = 'OK for one verify-ci re-run on PR 905';
+  const KEYS = ['ado:101', 'ado:102', 'ado:103', 'ado:104', 'ado:105'];
+  /** One session "patch-gaps-work" on five items, waiting on you: [over] shapes the reported wait,
+   *  [items] the items. All five sit on one line the session reported. */
+  const owner = ({ wait = {}, items = KEYS.map((k, i) => ({ ref: k, title: `Gap number ${i + 1}`, stage: 'fixing' })) } = {}) => {
+    const r = row('beta', { name: 'patch-gaps-work', items, reason: { kind: 'you', text: OWNER_WAIT, since: NOW - 3 * MIN },
+      wait: { on: 'you', what: OWNER_WAIT, at: NOW - 3 * MIN, ...wait } });
+    r.brief.line = 'Migdal (2)';
+    return r;
+  };
+  const youOn = (v) => v.subjects.filter((s) => s.waitsOn === 'you').map((s) => s.key).sort();
+
+  test('one session, five items, one wait with no ref: the items carry none of it, the view carries it once', () => {
+    const v = view({ rows: [owner()] });
+    expect(v.subjects.map((s) => s.key).sort()).toEqual(KEYS);
+    for (const s of v.subjects) {
+      expect(s.needsYou, s.key).toBe(null);
+      expect(s.waitsOn, s.key).not.toBe('you');
+      expect(s.buckets, s.key).toEqual(['active']);
+    }
+    expect(v.waits).toHaveLength(1);
+    expect(v.waits[0].subjects.slice().sort()).toEqual(KEYS);
+    expect(v.waits[0].card).toMatchObject({ kind: 'wait', sessionName: 'patch-gaps-work', what: OWNER_WAIT, subjectKey: null, ref: null, title: null });
+    // The line counts the wait once, not once per item.
+    const lines = L.linesView({ subjects: v.subjects, projects: [], waits: v.waits });
+    expect(lines).toHaveLength(1);
+    expect(lines[0].counts.needsYou).toBe(1);
+    // The project (and its area) too.
+    const other = pj.projectsView({ projects: [], sessions: [], subjects: v.subjects, waits: v.waits }, { platform: 'win32' }).find((p) => p.id === 'other');
+    expect(other.counts.needsYou).toBe(1);
+    expect(other.areas.map((a) => a.counts.needsYou).reduce((a, b) => a + b, 0)).toBe(1);
+  });
+
+  test('a wait with a ref marks only that item, and nothing is left over for the line', () => {
+    const v = view({ rows: [owner({ wait: { ref: 'ado:103' } })] });
+    expect(v.subjects.filter((s) => s.needsYou).map((s) => s.key)).toEqual(['ado:103']);
+    expect(youOn(v)).toEqual(['ado:103']);
+    expect(v.subjects.find((s) => s.key === 'ado:103')).toMatchObject({ buckets: ['active', 'needsYou'],
+      needsYou: { kind: 'wait', what: OWNER_WAIT, subjectKey: 'ado:103', ref: 'ado:103' } });
+    expect(v.waits).toEqual([]);
+    expect(L.linesView({ subjects: v.subjects, projects: [], waits: v.waits })[0].counts.needsYou).toBe(1);
+  });
+
+  test('the one item the session reports as blocked is the match; a session with one real item is on that item', () => {
+    const items = KEYS.map((k, i) => ({ ref: k, title: `Gap number ${i + 1}`, state: i === 1 ? 'blocked' : 'in-progress' }));
+    const v = view({ rows: [owner({ items })] });
+    expect(youOn(v)).toEqual(['ado:102']);
+    expect(v.waits).toEqual([]);
+    // `#0` is no work item (#548): the session holds ONE real item, so the wait is on it.
+    const one = view({ rows: [owner({ items: [{ ref: 'ado:101' }, { ref: 'ado:0' }] })] });
+    expect(youOn(one)).toEqual(['ado:101']);
+    expect(one.waits).toEqual([]);
+  });
+
+  test('an item reported done stays done; the wait is for the items that were waiting', () => {
+    const items = KEYS.map((k, i) => ({ ref: k, title: `Gap number ${i + 1}`, state: i === 0 ? 'done' : 'in-progress' }));
+    const v = view({ rows: [owner({ items })] });
+    expect(v.subjects.find((s) => s.key === 'ado:101').waitsOn).toBe('done');
+    expect(v.waits).toHaveLength(1);
+    expect(v.waits[0].subjects.slice().sort()).toEqual(KEYS.slice(1));
+    // Every item done: nothing waits on anyone, as before.
+    const all = view({ rows: [owner({ items: KEYS.map((k) => ({ ref: k, state: 'done' })) })] });
+    expect(all.waits).toEqual([]);
+    expect(youOn(all)).toEqual([]);
+  });
+
+  test('a wait naming an item the session reported done is the card Answer now shows (about that item), shown once for the others', () => {
+    const items = KEYS.map((k, i) => ({ ref: k, title: `Gap number ${i + 1}`, state: i === 0 ? 'done' : 'in-progress' }));
+    const v = view({ rows: [owner({ items, wait: { ref: 'ado:101' } })] });
+    expect(v.subjects.find((s) => s.key === 'ado:101')).toMatchObject({ waitsOn: 'done', needsYou: null });
+    expect(youOn(v)).toEqual([]);
+    expect(v.waits).toHaveLength(1);
+    expect(v.waits[0].card).toMatchObject({ subjectKey: 'ado:101', ref: 'ado:101', title: 'Gap number 1' });
+    expect(v.waits[0].subjects.slice().sort()).toEqual(KEYS.slice(1));
+  });
+
+  test('a session reporting one item twice (two spellings) covers it once', () => {
+    const items = [{ ref: 'ado:101' }, { ref: 'ado:101', title: 'again' }, { ref: 'ado:102' }];
+    const v = view({ rows: [owner({ items })] });
+    expect(v.waits).toHaveLength(1);
+    expect(v.waits[0].subjects.slice().sort()).toEqual(['ado:101', 'ado:102']);
+  });
+
+  test('two sessions waiting give two waits; a closed one gives none', () => {
+    const a = owner();
+    const b = owner({ wait: { what: 'which branch?' } });
+    b.name = 'second';
+    const v = view({ rows: [a, b], closed: [closedRec('beta', { items: [{ ref: 'ado:101' }] })] });
+    expect(v.waits.map((w) => w.card.sessionId).sort()).toEqual([a.id, b.id].sort());
+    expect(L.linesView({ subjects: v.subjects, projects: [], waits: v.waits })[0].counts.needsYou).toBe(2);
+  });
+
+  test('the filters keep the waits of the subjects they keep', () => {
+    const v = view({ rows: [owner()] });
+    const lineId = v.subjects[0].line.id;
+    expect(M.filterView(v, { line: lineId }).waits).toHaveLength(1);
+    // A page counts only the items it shows: one item moved to another line is not covered there.
+    const moved = M.buildView({ nodes: M.sessionNodes({ rows: [owner()], closed: [], now: NOW }), now: NOW, platform: 'win32',
+      lineOverrides: { 'ado:101': { line: { name: 'Elsewhere' } } } });
+    const here = M.filterView(moved, { line: moved.subjects.find((s) => s.key === 'ado:102').line.id }).waits;
+    expect(here).toHaveLength(1);
+    expect(here[0].subjects.slice().sort()).toEqual(KEYS.slice(1));
+    expect(M.filterView(moved, { line: moved.subjects.find((s) => s.key === 'ado:101').line.id }).waits[0].subjects).toEqual(['ado:101']);
+    expect(M.filterView(v, { line: 'other/~elsewhere' }).waits).toEqual([]);
+    expect(M.filterView(v, { project: 'nothing' }).waits).toEqual([]);
+  });
+});
