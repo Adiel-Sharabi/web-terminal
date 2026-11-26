@@ -740,13 +740,18 @@ class McStageStep {
 }
 
 /// A subject's progress (`Stage`, #505): the server's [current] (max of reported and
-/// evidence), each half, and the history of steps reached.
+/// evidence, held to the station's cap), each half, and the history of steps reached.
 class McStage {
   final String? current;
   final String? reported;
   final String? evidence;
+
+  /// #569 - an Azure DevOps item's station: its workflow state as ADO names it (`Parked`).
+  /// Null for any other item and from an older server. The authority over what a session
+  /// reported or a pull request proves, so it is shown instead of the generic stage.
+  final String? station;
   final List<McStageStep> history;
-  const McStage({this.current, this.reported, this.evidence, this.history = const []});
+  const McStage({this.current, this.reported, this.evidence, this.station, this.history = const []});
 
   static McStage fromJson(dynamic json) {
     final m = _map(json);
@@ -754,9 +759,14 @@ class McStage {
       current: _str(m['current']),
       reported: _str(m['reported']),
       evidence: _str(m['evidence']),
+      station: _str(m['station']),
       history: _list(m['history'], McStageStep.fromJson),
     );
   }
+
+  /// The words a stage is shown in (#569): the station as ADO names it, else the generic
+  /// stage's label, else null (nothing reported or seen yet).
+  String? get label => station ?? (current == null ? null : mcStageLabel(current!));
 
   /// The steps the history records for [stage], in the order sent.
   List<McStageStep> stepsFor(String stage) => [for (final s in history) if (s.stage == stage) s];
