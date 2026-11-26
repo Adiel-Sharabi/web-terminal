@@ -271,6 +271,29 @@ test.describe('bug-hunter items', () => {
     expect(b.phases).toEqual([]);
     expect(bh.discoverRunDirs([path.join(root, 'missing')])).toEqual([]);
   });
+
+  test('Bug Hunter 1A and 2A keep their run in .claude/bug-hunter-1a: it is discovered like the main one, with its events', () => {
+    const own = path.join(root, 'run-1a', '.claude', 'bug-hunter-1a');
+    const main = path.join(root, 'run-main', '.claude', 'bug-hunter');
+    const none = path.join(root, 'run-none', '.claude', 'bug-hunter-1a');   // a folder without a state.json is not a run
+    for (const d of [own, main, none]) fs.mkdirSync(d, { recursive: true });
+    fs.writeFileSync(path.join(own, 'state.json'), JSON.stringify({ processed: { 601: { outcome: 'fixed-pushed', startedAt: at(0), finishedAt: at(60) } } }));
+    fs.writeFileSync(path.join(main, 'state.json'), JSON.stringify({ processed: { 602: { outcome: 'fixed-pushed', startedAt: at(0), finishedAt: at(60) } } }));
+    fs.writeFileSync(path.join(own, 'events.jsonl'), [
+      JSON.stringify({ at: at(1), item: 601, kind: 'worker', wtId: 'wt-1a', name: 'BH1A worker #601', attempt: 1, model: 'fable' }),
+      JSON.stringify({ at: at(30), item: 601, kind: 'phase', phase: 'fix' }),
+    ].join('\n'));
+    const dirs = bh.discoverRunDirs([root]);
+    expect(dirs.sort()).toEqual([main, own].sort());
+    const items = bh.scanBhDirs(dirs, { origin: 'Home' });
+    const a = items.find((i) => i.item === 601);
+    expect(a.run).toBe('run-1a');
+    expect(a.hasEvents).toBe(true);
+    expect(a.workers).toEqual(['wt-1a']);
+    expect(a.models).toEqual(['fable']);
+    expect(a.phases.map((p) => p.phase)).toEqual(['fix']);
+    expect(items.find((i) => i.item === 602).run).toBe('run-main');
+  });
 });
 
 test.describe('the report', () => {
