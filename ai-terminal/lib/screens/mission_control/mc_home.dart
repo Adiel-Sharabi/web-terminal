@@ -56,8 +56,10 @@ enum McTab {
   final IconData icon;
   final IconData selectedIcon;
 
-  static const List<McTab> desktopTabs = [now, projects, sessions, machines];
-  static const List<McTab> phoneTabs = [now, projects, ask, machines];
+  // No Lines tab (owner, 2026-11-26): the home is what runs. [projects] is still a place - a
+  // line or project tapped on Now opens there, over Now, and Back returns to Now.
+  static const List<McTab> desktopTabs = [now, sessions, machines];
+  static const List<McTab> phoneTabs = [now, ask, machines];
 }
 
 class MissionControlHome extends StatefulWidget {
@@ -270,6 +272,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             onStartWork: (projectId) => _startWork(projectId: projectId),
             actions: _actions(),
             active: _isActive,
+            onExit: () => setState(() => _tab = McTab.now),
           ),
         McTab.sessions => (widget.sessionsBoardBuilder ??
             (open) => WorkBoardScreen(
@@ -361,8 +364,9 @@ class _MissionControlHomeState extends State<MissionControlHome> {
       final tabs = wide ? McTab.desktopTabs : McTab.phoneTabs;
       // A tab the other layout has (Sessions on a phone, Ask on desktop) shows Now: the
       // choice is kept, so turning back shows it again.
-      final shown = tabs.contains(_tab) ? _tab : McTab.now;
-      final index = tabs.indexOf(shown);
+      // A line or project opened from Now shows over Now, which stays lit in the bar.
+      final shown = _tab == McTab.projects || tabs.contains(_tab) ? _tab : McTab.now;
+      final index = tabs.indexOf(shown == McTab.projects ? McTab.now : shown);
       // The Sessions board and the Projects navigator bring their own bars.
       final body = shown == McTab.sessions || shown == McTab.projects
           ? _body(shown)
