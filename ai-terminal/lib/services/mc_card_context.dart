@@ -38,9 +38,9 @@ class McContextReply {
 class McContextItem {
   const McContextItem({required this.key, required this.ref, this.title, this.state, this.stage, this.station, this.note, this.url});
 
-  /// What opens the item's page: the subject's own key when the server knew it, else the
-  /// session's key for it.
-  final String key;
+  /// What opens the item's page: the subject's own key when the server knew it, else the card's
+  /// own key for its own item. Null when nothing names a page that exists: the row shows, untappable.
+  final String? key;
   final String ref;
   final String? title;
 
@@ -102,14 +102,28 @@ class McCardContextReader {
     final named = <BriefItem>[
       for (final i in s?.brief?.items ?? const <BriefItem>[]) i,
     ];
+    // The card's own item is known by the server's SUBJECT key (`card.subjectKey`), which is not
+    // always the session's brief key: a bare `#12` from a folder with no GitHub origin is the
+    // subject `#12@<session>`. So that item is asked about, and opened, by the card's key.
     final ownKey = card.subjectKey ?? card.ref;
-    if (ownKey != null && !named.any((i) => i.key == ownKey || i.ref == ownKey || i.ref == card.ref)) {
-      named.insert(0, BriefItem(ref: card.ref ?? ownKey, key: ownKey, title: card.title ?? ''));
+    var own = -1;
+    if (ownKey != null) {
+      own = named.indexWhere((i) => i.key == ownKey || i.ref == ownKey || (card.ref != null && i.ref == card.ref));
+      if (own < 0) {
+        named.insert(0, BriefItem(ref: card.ref ?? ownKey, key: ownKey, title: card.title ?? ''));
+        own = 0;
+      } else if (card.subjectKey != null && named[own].key != card.subjectKey) {
+        final i = named[own];
+        named[own] = BriefItem(ref: i.ref, key: card.subjectKey!, title: i.title, state: i.state, note: i.note, pinned: i.pinned, url: i.url, pin: i.pin);
+      }
     }
-    return Future.wait(named.map(_item));
+    return Future.wait([for (var n = 0; n < named.length; n++) _item(named[n], ownItem: n == own)]);
   }
 
-  Future<McContextItem> _item(BriefItem i) async {
+  /// [ownItem]: the card's own item, whose key the server itself named. Any other item opens a
+  /// page only when the feed knows it: a brief key that is not a tracker key is not a subject key,
+  /// so a page opened by it would report the item as gone.
+  Future<McContextItem> _item(BriefItem i, {required bool ownItem}) async {
     McSubject? sub;
     try {
       sub = (await subject(i.key).timeout(kMcContextSubjectWait)).subject;
@@ -118,7 +132,7 @@ class McCardContextReader {
     }
     final title = i.title.isNotEmpty ? i.title : sub?.titleLabel;
     return McContextItem(
-      key: sub?.key ?? i.key,
+      key: sub?.key ?? (ownItem ? i.key : null),
       ref: i.ref,
       title: title == null || title.isEmpty ? null : title,
       state: i.state,

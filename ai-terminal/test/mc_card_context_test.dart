@@ -176,6 +176,17 @@ void main() {
       expect(find.byKey(const ValueKey('mc-ctx-sheet')), findsNothing);
     });
 
+    testWidgets('an item with no page to open shows and does nothing on a tap', (tester) async {
+      final p = _Port()
+        ..items = const [McContextItem(key: null, ref: '#13', title: 'Bare item', state: 'planning')];
+      await _open(tester, _card(), p);
+      expect(find.descendant(of: find.byKey(const ValueKey('mc-ctx-item-0')), matching: find.text('#13  Bare item')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('mc-ctx-item-0')));
+      await tester.pumpAndSettle();
+      expect(p.subjects, isEmpty);
+      expect(find.byKey(const ValueKey('mc-ctx-sheet')), findsOneWidget);
+    });
+
     testWidgets('Answer and Open session close the sheet and take the card own paths', (tester) async {
       final p = _Port();
       await _open(tester, _card(), p);
@@ -377,6 +388,35 @@ void main() {
       expect(items.single.title, 'Lonely');
       expect(items.single.where, isNull);
       expect(items.single.key, 'ado:9');
+    });
+
+    test("the card's own item is asked about and opened by the SERVER's subject key, not the brief's bare key", () async {
+      // A folder with no GitHub origin reports `#12`; the server's subject for it is `#12@s1`.
+      subjectsBody['#12@s1'] = _subjectJson('#12@s1', current: 'fixing');
+      final s = _session(items: const [BriefItem(ref: '#12', key: '#12', title: 'Own item', state: 'in-progress', note: 'half done')]);
+      final card = McCard.fromJson({..._cardJson(), 'ref': '#12', 'subjectKey': '#12@s1'})!;
+      final items = await reader(sessions: [s]).items(card);
+      expect(items, hasLength(1));
+      expect(items.single.key, '#12@s1');
+      expect(items.single.where, 'Stage: Fixing');
+      // Everything the session reported about it is kept.
+      expect(items.single.title, 'Own item');
+      expect(items.single.note, 'half done');
+      expect(items.single.state, 'in-progress');
+    });
+
+    test('another item the feed does not know opens nothing: it shows, with no page to open', () async {
+      subjectsBody['#12@s1'] = _subjectJson('#12@s1');
+      final s = _session(items: const [
+        BriefItem(ref: '#12', key: '#12', title: 'Own item'),
+        BriefItem(ref: '#13', key: '#13', title: 'Other bare item'),
+      ]);
+      final card = McCard.fromJson({..._cardJson(), 'ref': '#12', 'subjectKey': '#12@s1'})!;
+      final items = await reader(sessions: [s]).items(card);
+      expect(items.map((i) => i.ref), ['#12', '#13']);
+      expect(items[0].key, '#12@s1');
+      expect(items[1].key, isNull, reason: '`#13` is not a subject key: a page opened by it would say the item is gone');
+      expect(items[1].title, 'Other bare item');
     });
 
     test("the card's own item comes first when the session does not list it; none when nothing is named", () async {

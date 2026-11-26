@@ -249,7 +249,7 @@ class _McCardContextSheetState extends State<McCardContextSheet> {
     return InkWell(
       key: ValueKey('mc-ctx-item-$i'),
       borderRadius: BorderRadius.circular(6),
-      onTap: () => _leaveTo(() => widget.port.openSubject(it.key)),
+      onTap: it.key == null ? null : () => _leaveTo(() => widget.port.openSubject(it.key!)),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 2),
         child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [

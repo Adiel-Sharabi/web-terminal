@@ -502,6 +502,15 @@ test.describe('buildRecap fullReply (#571)', () => {
     expect(r.reply.full.endsWith('…')).toBe(true);
   });
 
+  test('the cut never splits a surrogate pair (an emoji on the boundary)', () => {
+    const body = 'a'.repeat(FULL_REPLY_CHARS - 2) + '\u{1F600}' + 'b'.repeat(50);
+    const r = buildRecap([user('go'), msg(body, 'm')], { fullReply: true });
+    const before = r.reply.full.slice(0, -1);
+    expect(r.reply.full.endsWith('…')).toBe(true);
+    expect(/[\ud800-\udbff]$/.test(before)).toBe(false);
+    expect(r.reply.full.length).toBeLessThanOrEqual(FULL_REPLY_CHARS);
+  });
+
   test('no reply yet: reply stays null, with or without the flag', () => {
     expect(buildRecap([user('go')], { fullReply: true }).reply).toBeNull();
   });

@@ -183,6 +183,10 @@ test.describe('GET /api/sessions/:id/recap', () => {
     // Only the opt-in value turns it on; anything else is the default shape.
     const other = await (await ctx.get(`/api/sessions/${s.id}/recap?full=0`)).json();
     expect(other.reply).not.toHaveProperty('full');
+    const asTrue = await (await ctx.get(`/api/sessions/${s.id}/recap?full=true`)).json();
+    expect(asTrue.reply.full).toBe(whole);
+    const repeated = await (await ctx.get(`/api/sessions/${s.id}/recap?full=1&full=1`)).json();
+    expect(repeated.reply).not.toHaveProperty('full');
     await ctx.delete(`/api/sessions/${s.id}`);
     await ctx.dispose();
   });

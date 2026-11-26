@@ -44,7 +44,6 @@ import 'now_view.dart';
 import 'project_view.dart';
 import 'question_panel.dart';
 import 'start_work_sheet.dart';
-import 'subject_screen.dart' show McSubjectScreen;
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
@@ -208,12 +207,12 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     },
   );
 
-  /// A work item's page over whatever is showing (a tap on an item of a card's sheet).
+  /// A work item's page (a tap on an item of a card's sheet): through the projects navigator, like
+  /// every other way to an item's page, so it sits under [McQuestionScope] and its cards keep the
+  /// in-place answer and the context sheet.
   void _openSubject(String key) {
-    Navigator.of(context).push(MaterialPageRoute<void>(
-      settings: RouteSettings(name: 'mc-subject/$key'),
-      builder: (_) => McSubjectScreen(feed: _feed, subjectKey: key, onAnswer: _answer, onOpenSession: _openSession),
-    ));
+    setState(() => _tab = McTab.projects);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openSubject(key));
   }
 
   /// Desktop: whether the Ask panel is open beside the tab.

@@ -17,6 +17,7 @@ import 'package:ai_terminal/api/models.dart';
 import 'package:ai_terminal/screens/mission_control/mc_home.dart';
 import 'package:ai_terminal/screens/mission_control/now_view.dart';
 import 'package:ai_terminal/screens/mission_control/project_view.dart';
+import 'package:ai_terminal/screens/mission_control/question_panel.dart';
 import 'package:ai_terminal/screens/mission_control/subject_screen.dart';
 import 'package:ai_terminal/services/mc_feed.dart';
 import 'package:ai_terminal/theme/app_theme.dart';
@@ -582,6 +583,39 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(McSubjectScreen), findsNothing);
       expect(find.byType(McProjectScreen), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets("#571 a work item opened from a card's context sheet keeps Mission Control's scope, so its cards answer in place and open their context", (tester) async {
+      await _size(tester, const Size(1400, 2400));
+      final feed = _Cluster().feed();
+      addTearDown(feed.dispose);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.dark,
+        home: MissionControlHome(
+          feed: feed,
+          active: ValueNotifier<bool>(true),
+          onShowSessionsHome: () {},
+          sessionsBoardBuilder: (open) => const Scaffold(body: Text('the sessions board')),
+        ),
+      ));
+      await feed.refresh();
+      await tester.pumpAndSettle();
+      // Tap the first card on Now: its context sheet opens, naming the card's own item.
+      await tester.tap(find.descendant(
+        of: find.byKey(const ValueKey('mc-card-alpha|s-1|you:pick')),
+        matching: find.byKey(const ValueKey('mc-card-heading')),
+      ));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('mc-ctx-sheet')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('mc-ctx-item-0')));
+      await tester.pumpAndSettle();
+      // The item's page is up, under the projects navigator and so under the scope that carries the
+      // context port: a page pushed from above it would find no scope and lose both features.
+      expect(find.byKey(const ValueKey('mc-ctx-sheet')), findsNothing);
+      expect(find.byType(McSubjectScreen), findsOneWidget);
+      expect(McQuestionScope.maybeOf(tester.element(find.byType(McSubjectScreen))), isNotNull);
+      expect(McQuestionScope.maybeOf(tester.element(find.byType(McSubjectScreen)))!.contextPort, isNotNull);
       await tester.pumpWidget(const SizedBox());
     });
 

@@ -662,7 +662,7 @@ text of the reply `reply.text` condenses, markdown as the agent wrote it, capped
 message on its own transcript line, so the blocks of a message are one reply: assistant turns now carry
 `messageId` (`message.id`, when the line has one; Codex has none), and `reply.full` joins the text
 blocks that share the reply's id, oldest first, blank-line separated; a turn with no id is its own
-reply. Without `full=1` (or with any other value) the recap's shape is exactly as before, and Mission
+reply. Without `full=1` or `full=true` (any other value, empty or repeated, included) the recap's shape is exactly as before, and Mission
 Control's Ask and "Tell it" never ask for it. A server older than 1.138.0 ignores the flag: the sheet
 then shows the condensed reply and labels it "the short form". The station and stage come from
 `GET /api/mc/subjects/:key` (read per item, 4 s each: an item whose page cannot be read still shows, without
