@@ -85,6 +85,12 @@ process.env.WT_SESSIONS_JOURNAL_FILE = path.join(__dirname, 'sessions-journal.te
 // #467 - the push device registry: the suite's registrations never land in production's
 // push-devices.json, where a real push would fan out to them; reset per run.
 process.env.WT_PUSH_DEVICES_FILE = path.join(__dirname, 'push-devices.test.json');
+// #529 - the fleet usage ledger: its files, the persisted Claude-session map and the fixture ~/.claude tree a spec
+// fills all live under this checkout and are reset per run; the suite never reads or writes the machine's real ones.
+process.env.WT_FLEET_USAGE_DIR = path.join(__dirname, 'usage-ledger.test');
+process.env.WT_FLEET_USAGE_CLAUDE_DIR = path.join(__dirname, 'usage-claude.test');
+process.env.WT_AGENT_SESSIONS_FILE = path.join(__dirname, 'agent-sessions.test.jsonl');
+process.env.WT_FLEET_USAGE_ROOTS = path.join(__dirname, 'usage-claude.test', 'work');
 // #393 - the agent settings the context budget reads (autoCompactWindow). Never the real
 // ~/.claude/settings.json: the suite's budget must not depend on the machine it runs on, and
 // tests/context-budget.spec.js writes and edits this one to prove the setting is read live.

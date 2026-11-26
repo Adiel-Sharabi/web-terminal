@@ -129,3 +129,7 @@ mc-state.json.tmp
 mc-state.json.corrupt-*
 mc-state.test.json
 mc-state.test.json.tmp
+# The fleet usage ledger (#529): the suite's copies (production's are under logs/).
+usage-ledger.test/
+usage-claude.test/
+agent-sessions.test.jsonl*

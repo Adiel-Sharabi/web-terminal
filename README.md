@@ -915,6 +915,14 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   also reads the waiting session's last turns, so it can explain the terms the question uses.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
+- **Fleet usage ledger (#529):** what every Claude session on every machine cost - tokens and weighted units
+  per day, model and subagent, the cost of wake-ups after an idle hour, active versus waiting-on-you time, who
+  started it and what it was for, per project (work or private), plus the bug hunter per work item and a
+  "quality by context" section (does a smaller context give better results?). Each machine appends to its own
+  file and copies the others' through the cluster, so any machine answers; nothing is ever sent to a model and
+  no prompt text is stored. `node scripts/usage-report.js --days 7`, `GET /api/usage/report`, and
+  [docs/USAGE-LEDGER.md](docs/USAGE-LEDGER.md).
+
 **Companion app** — a native Android + Windows client with the chat lens and push that
 works while the app is closed.
 
@@ -932,6 +940,7 @@ Full list: **[docs/FEATURES.md](docs/FEATURES.md)**.
 | **[docs/COMPANION.md](docs/COMPANION.md)** | The Android + Windows companion app |
 | **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** | Known symptoms and dev tooling |
 | **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** | How the three-process design works |
+| **[docs/USAGE-LEDGER.md](docs/USAGE-LEDGER.md)** | The fleet usage ledger: what is recorded, replication, work versus private, the report, quality by context, size |
 | **[docs/mission-control.md](docs/mission-control.md)** | Mission Control's wire contract: work-item details, projects and areas, stage, subjects and runs, Answer now and My to-do, Ask, Start work, questions with context, lines of work |
 | **[AGENTS.md](AGENTS.md)** | Point an AI agent at this repo and it can install and operate it |
 | **[CONTRIBUTING.md](CONTRIBUTING.md)** | Dev setup and the PR gate |

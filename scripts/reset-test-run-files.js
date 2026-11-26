@@ -89,6 +89,17 @@ if (process.env.WT_SESSIONS_JOURNAL_FILE) {
   reset(process.env.WT_SESSIONS_JOURNAL_FILE, '#466');
   reset(`${process.env.WT_SESSIONS_JOURNAL_FILE}.1`, '#466');
 }
+// #529 - the fleet usage ledger: a run starts with an empty ledger, an empty fixture tree and no remembered
+// Claude sessions. The two directories are removed only when their name ends in `.test` (never a real ledger).
+for (const d of [process.env.WT_FLEET_USAGE_DIR, process.env.WT_FLEET_USAGE_CLAUDE_DIR]) {
+  if (!d) continue;
+  if (!path.basename(d).endsWith('.test')) { console.error(`[test-reset] REFUSED: ${path.basename(d)} is not a .test directory (#529)`); process.exitCode = 1; continue; }
+  try { fs.rmSync(d, { recursive: true, force: true }); } catch (e) { console.warn(`[test-reset] could not remove ${path.basename(d)}:`, e.message); }
+}
+if (process.env.WT_AGENT_SESSIONS_FILE) {
+  reset(process.env.WT_AGENT_SESSIONS_FILE, '#529');
+  reset(`${process.env.WT_AGENT_SESSIONS_FILE}.1`, '#529');
+}
 // #351 - the spawn reaper's verdicts: per-run state like the files above, so a run starts
 // from none rather than from whatever an interrupted one left.
 if (process.env.WT_SPAWNED_SESSIONS_FILE) reset(process.env.WT_SPAWNED_SESSIONS_FILE, '#351');

@@ -6,5 +6,6 @@
   "defaultCwd": "C:\\dev",
   "scanFolders": ["C:\\dev"],
   "defaultCommand": "",
-  "enableRemoteExec": false
+  "enableRemoteExec": false,
+  "usageLedger": { "enabled": true, "collectMin": 30, "syncMin": 5, "workSource": "" }
 }
