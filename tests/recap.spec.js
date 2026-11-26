@@ -424,3 +424,94 @@ test.describe('#246 — the recent-prompt trail', () => {
     expect(findHumanPromptIndex([asst('nothing typed')])).toBe(-1);
   });
 });
+
+// #571 - `reply.full`: the whole last reply, opt-in, for Mission Control's card sheet. The
+// default recap is a one-glance card and its shape must not move (an old client, the Analyst's
+// bundle and the "Tell it" line all read it).
+test.describe('buildRecap fullReply (#571)', () => {
+  const { FULL_REPLY_CHARS } = require('../lib/recap');
+  const LONG = [
+    '## What changed',
+    '',
+    'First paragraph with `code` and a [link](https://example.com/a).',
+    '',
+    '```js',
+    'const a = 1;',
+    '```',
+    '',
+    '- one',
+    '- two',
+    '',
+    'word '.repeat(120).trim(),
+    '',
+    '## TL;DR',
+    'Pick one of the three.',
+  ].join('\n');
+  const msg = (text, messageId, toolUses = []) => ({ role: 'assistant', text, toolUses, ts: null, messageId });
+
+  test('the default shape carries NO `full` - it is opt-in', () => {
+    const r = buildRecap([user('go'), asst(LONG)]);
+    expect(r.reply).not.toHaveProperty('full');
+    expect(Object.keys(r.reply).sort()).toEqual(['at', 'isSummary', 'text']);
+  });
+
+  test('`full` is the whole reply, markdown and newlines kept; `text` stays the 280-char reminder', () => {
+    const r = buildRecap([user('go'), asst(LONG)], { fullReply: true });
+    expect(r.reply.full).toBe(LONG);
+    expect(r.reply.full.length).toBeGreaterThan(280);
+    // The reminder is exactly what it was: the author's TL;DR, condensed.
+    expect(r.reply.text).toBe('Pick one of the three.');
+    expect(r.reply.isSummary).toBe(true);
+  });
+
+  test('the blocks of ONE message are one reply, joined in order', () => {
+    // Claude writes each content block of a message on its own line: text, a tool call, more text.
+    const r = buildRecap([
+      user('go'),
+      msg('First block.', 'msg_1'),
+      msg('', 'msg_1', [tool('Bash')]),
+      msg('Second block.', 'msg_1'),
+    ], { fullReply: true });
+    expect(r.reply.full).toBe('First block.\n\nSecond block.');
+    expect(r.reply.text).toBe('Second block.');
+  });
+
+  test('another message is NOT part of the reply: an earlier progress note stays out', () => {
+    const r = buildRecap([
+      user('go'),
+      msg('Let me look at that.', 'msg_1'),
+      msg('', 'msg_1', [tool('Bash')]),
+      msg('Here is the answer.', 'msg_2'),
+    ], { fullReply: true });
+    expect(r.reply.full).toBe('Here is the answer.');
+  });
+
+  test('turns with no message id (Codex, an older page) are each their own reply', () => {
+    const r = buildRecap([user('go'), asst('One.'), asst('Two.')], { fullReply: true });
+    expect(r.reply.full).toBe('Two.');
+  });
+
+  test('the walk never crosses the prompt, so a reply is never glued to an earlier turn', () => {
+    const r = buildRecap([msg('Old reply.', 'msg_1'), user('next'), msg('New reply.', 'msg_1')], { fullReply: true });
+    expect(r.reply.full).toBe('New reply.');
+  });
+
+  test('a reply longer than the cap is cut, and the cut shows', () => {
+    const r = buildRecap([user('go'), msg('a'.repeat(40000), 'm'), msg('b'.repeat(40000), 'm')], { fullReply: true });
+    expect(r.reply.full.length).toBe(FULL_REPLY_CHARS);
+    expect(r.reply.full.endsWith('…')).toBe(true);
+  });
+
+  test('the cut never splits a surrogate pair (an emoji on the boundary)', () => {
+    const body = 'a'.repeat(FULL_REPLY_CHARS - 2) + '\u{1F600}' + 'b'.repeat(50);
+    const r = buildRecap([user('go'), msg(body, 'm')], { fullReply: true });
+    const before = r.reply.full.slice(0, -1);
+    expect(r.reply.full.endsWith('…')).toBe(true);
+    expect(/[\ud800-\udbff]$/.test(before)).toBe(false);
+    expect(r.reply.full.length).toBeLessThanOrEqual(FULL_REPLY_CHARS);
+  });
+
+  test('no reply yet: reply stays null, with or without the flag', () => {
+    expect(buildRecap([user('go')], { fullReply: true }).reply).toBeNull();
+  });
+});

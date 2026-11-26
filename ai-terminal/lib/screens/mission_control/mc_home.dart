@@ -21,6 +21,7 @@ import '../../api/api_client.dart';
 import '../../api/mc_ask_models.dart';
 import '../../api/mc_models.dart';
 import '../../services/mc_analyst.dart';
+import '../../services/mc_card_context.dart';
 import '../../api/models.dart';
 import '../../services/app_config.dart';
 import '../../services/mc_feed.dart';
@@ -37,6 +38,7 @@ import '../work_board_screen.dart';
 import 'answer_sheet.dart';
 import 'ask_reply_dialog.dart';
 import 'ask_view.dart';
+import 'card_context_sheet.dart' show McCardContextPort;
 import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
@@ -185,6 +187,33 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     },
     askAbout: (card) => McQuestionScope.openPanel(context, card: card, analyst: _analyst, onSend: _sendPick, askFirst: true),
   );
+
+  // #571 - a card tapped opens its full context: the session's own last reply, the items it names
+  // with their station, the decision with its options. The readers hold no state of their own; the
+  // answer and Open session are the card's own paths ([_answer], [_openSession]).
+  late final McCardContextReader _contexts = McCardContextReader(
+    sessions: () => _repo.current,
+    client: _client,
+    subject: (key) => _feed.subject(key),
+  );
+
+  late final McCardContextPort _contextPort = McCardContextPort(
+    reply: _contexts.reply,
+    items: _contexts.items,
+    openSubject: _openSubject,
+    answer: _answer,
+    openSession: (card) {
+      if (card.sessionId != null) _openSession(card.sessionId!);
+    },
+  );
+
+  /// A work item's page (a tap on an item of a card's sheet): through the projects navigator, like
+  /// every other way to an item's page, so it sits under [McQuestionScope] and its cards keep the
+  /// in-place answer and the context sheet.
+  void _openSubject(String key) {
+    setState(() => _tab = McTab.projects);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openSubject(key));
+  }
 
   /// Desktop: whether the Ask panel is open beside the tab.
   bool _askPanel = false;
@@ -358,7 +387,13 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   @override
   Widget build(BuildContext context) {
     // #510 - every question card below (Now, a subject) opens its panel through this.
-    return McQuestionScope(analyst: _analyst, onSend: _sendPick, onAnswer: _answer, answerPort: _answerPort, child: _layout());
+    return McQuestionScope(
+        analyst: _analyst,
+        onSend: _sendPick,
+        onAnswer: _answer,
+        answerPort: _answerPort,
+        contextPort: _contextPort,
+        child: _layout());
   }
 
   Widget _layout() {

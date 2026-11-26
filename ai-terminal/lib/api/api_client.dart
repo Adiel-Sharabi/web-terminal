@@ -1065,8 +1065,12 @@ class ApiClient {
   /// Never 404s for a live session: one with no transcript still returns
   /// name/cwd/status with null prompt/reply. A `404` means the session id is
   /// unknown; older servers (< 1.57.0) also 404 the route itself.
-  Future<SessionRecap> recap(String sessionId) async {
-    final res = await _send('GET', '/api/sessions/$sessionId/recap');
+  ///
+  /// [full] (#571) asks for the reply's whole text too (`reply.full`, markdown as written) - what
+  /// Mission Control's card sheet shows; a server older than 1.138.0 ignores it and sends the
+  /// condensed reminder only, which the caller reads as "no whole text".
+  Future<SessionRecap> recap(String sessionId, {bool full = false}) async {
+    final res = await _send('GET', '/api/sessions/$sessionId/recap', query: full ? const {'full': '1'} : null);
     return SessionRecap.fromJson(_asMap(_decode(res)));
   }
 

@@ -90,12 +90,24 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
     nav.push(_lineRoute(lineId));
   }
 
-  Route<void> _subjectRoute(BuildContext context, McSubject s) => MaterialPageRoute<void>(
-        settings: RouteSettings(name: 'mc-subject/${s.key}'),
+  /// Shows the work item [subjectKey]'s page, over the list (#571: a tap on an item of a card's
+  /// context sheet). Under this navigator the page keeps Mission Control's scope, so its own cards
+  /// answer in place and open their context like any other.
+  void openSubject(String subjectKey) {
+    final nav = _nav.currentState;
+    if (nav == null) return;
+    nav.popUntil((r) => r.isFirst);
+    nav.push(_subjectRouteOf(subjectKey));
+  }
+
+  Route<void> _subjectRoute(BuildContext context, McSubject s) => _subjectRouteOf(s.key, initial: s);
+
+  Route<void> _subjectRouteOf(String subjectKey, {McSubject? initial}) => MaterialPageRoute<void>(
+        settings: RouteSettings(name: 'mc-subject/$subjectKey'),
         builder: (_) => McSubjectScreen(
           feed: widget.feed,
-          subjectKey: s.key,
-          initial: s,
+          subjectKey: subjectKey,
+          initial: initial,
           onAnswer: widget.onAnswer,
           onOpenSession: widget.onOpenSession,
           now: widget.now,

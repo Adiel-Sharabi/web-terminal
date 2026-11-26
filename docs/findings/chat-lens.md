@@ -71,6 +71,16 @@ most likely to be clicked. The client always receives the full shape.
 > onto a server-published field is a separate additive change, **not** a "keep them in
 > sync" instruction.
 
+**The whole reply is an opt-in field, grouped by `message.id` (#571).** Mission Control's card sheet shows
+the session's last reply in full: `GET /api/sessions/:id/recap?full=1` adds `reply.full` (the default
+shape is untouched - `reply.text` stays the 280-character reminder). Claude writes each content block of
+ONE API message on its own line, so the blocks of a message are one reply and the parser's assistant turn
+carries `messageId`; `reply.full` joins the text blocks that share the reply's id (a turn without one,
+Codex or an older page, is its own reply). Measured 2026-11-26 over the 40 newest local transcripts: 1 of
+1304 messages held more than one text block, so grouping rarely changes the text - it is there so the
+rare case is not cut in half. Never join the text of different messages: an earlier progress note
+("Let me look at that") is not part of the reply. Rules: `lib/recap.js` `fullReplyText`.
+
 ## A prompt sent WHILE THE AGENT WORKS is not a `role:user` turn (#249)
 
 **Law, as `CLAUDE.md` stated it until 2026-10-26** — moved here verbatim when `CLAUDE.md` became a one-line-per-rule digest. Frozen history: the digest line in `CLAUDE.md` is the only current law.

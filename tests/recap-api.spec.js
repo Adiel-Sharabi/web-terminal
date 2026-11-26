@@ -160,6 +160,37 @@ test.describe('GET /api/sessions/:id/recap', () => {
     await ctx.dispose();
   });
 
+  test('?full=1 adds the whole last reply (#571); the default shape has none', async () => {
+    const cwd = process.env.TEMP || os.tmpdir();
+    const whole = ['# Findings', '', 'word '.repeat(120).trim(), '', '- a', '- b', '', 'The end.'].join('\n');
+    fs.mkdirSync(FIXTURE_DIR, { recursive: true });
+    const p = path.join(FIXTURE_DIR, `rollout-2098-01-03T00-00-00-${process.pid}-${created.length}.jsonl`);
+    const line = (type, payload) => JSON.stringify({ timestamp: '2098-01-03T00:00:00.000Z', type, payload });
+    fs.writeFileSync(p, [
+      line('session_meta', { id: 'full-fixture-uuid', cwd, cli_version: '0.144.0' }),
+      line('response_item', { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'what did you find?' }] }),
+      line('response_item', { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: whole }] }),
+    ].join('\n') + '\n', 'utf8');
+    created.push(p);
+    const ctx = await authCtx();
+    const s = await mkSession(ctx, { name: 'recap-full', cwd, agent: 'codex' });
+    const plain = await (await ctx.get(`/api/sessions/${s.id}/recap`)).json();
+    expect(plain.reply).not.toHaveProperty('full');
+    expect(plain.reply.text.length).toBeLessThanOrEqual(281);
+    const full = await (await ctx.get(`/api/sessions/${s.id}/recap?full=1`)).json();
+    expect(full.reply.full).toBe(whole);
+    expect(full.reply.text).toBe(plain.reply.text);
+    // Only the opt-in value turns it on; anything else is the default shape.
+    const other = await (await ctx.get(`/api/sessions/${s.id}/recap?full=0`)).json();
+    expect(other.reply).not.toHaveProperty('full');
+    const asTrue = await (await ctx.get(`/api/sessions/${s.id}/recap?full=true`)).json();
+    expect(asTrue.reply.full).toBe(whole);
+    const repeated = await (await ctx.get(`/api/sessions/${s.id}/recap?full=1&full=1`)).json();
+    expect(repeated.reply).not.toHaveProperty('full');
+    await ctx.delete(`/api/sessions/${s.id}`);
+    await ctx.dispose();
+  });
+
   test('finds a prompt buried behind a long tool run (pages backward)', async () => {
     // THE regression. Measured on the live fleet 2026-08-03: 3 of 12 sessions had
     // zero user turns in their newest 80 because one tool-heavy stretch buries the

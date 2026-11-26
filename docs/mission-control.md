@@ -7,7 +7,7 @@ Unknown/missing data is `null`, never guessed. Sections below a milestone that h
 are the plan, not a description of the server.
 
 Landed: Who answers, Work-item meta (#502), Projects and areas (#503), Stage (#505), Subjects
-(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510), Lines of work (#523), Asks (#526). Advertised in `/api/version`
+(#504), Answer now / My to-do (#506), Ask (#511), Start work (#512), Questions context (#510), Lines of work (#523), Asks (#526), card context sheet (#571). Advertised in `/api/version`
 `capabilities`: `work-item-meta`, `mission-control` (#502/#503), `mc-subjects` (#504/#505: the
 subjects routes, `stage` on report items, `counts.stages`), `mc-needs` (#506: `/api/mc/now`,
 `/api/mc/todo[/:id]`, `/api/mc/later`), `mc-start` (#512: `POST /api/mc/start`,
@@ -638,3 +638,32 @@ Report: optional top-level `line` (one line, at most 80; anything else refuses t
 reason; a `line` with only a `wait` is refused too, never dropped). A wait-only report keeps it; a full report without it clears it. `brief.line` carries it
 (null when none) and a closed record keeps it. The per-prompt note does not teach it (its length
 budget); the refusal does.
+
+## A card's full context (#571) - the sheet
+Tapping a card (an Answer-now card, an ask, a to-do action; on Now, a work item's page, a line or a
+project) opens a **full-context sheet**: full screen below `AdaptiveHome.splitBreakpoint`, a dialog at or
+above it. It shows the session's OWN words, never a model's account of them (that stays the card's
+"More context", `questions.open`). Top to bottom: (1) what the card asks - a decision's question,
+context and EVERY option with its consequence, the recommended one starred; a question card's
+questions in full; a wait's words; an action's steps and where; (2) every work item the session names
+(its brief's `items`; the card's own item first when the session does not list it) with its ADO
+**station** (`stage.station`, #569) or, for any other item, its stage label, and the state the session
+reported - each opens that item's page; (3) the session's last reply in full, markdown rendered with
+links as text spans (#83). **Answer** is the card's own path (the home's `_answer`: the reply dialog for
+an ask, the answer sheet for a wait, a decision or a question) and **Open session** the card's own
+`openSession`; the sheet sends nothing and decides nothing. Every section degrades to a line (no reply
+yet, "its reply could not be read", "it names no work item"); a session this app does not list reads
+no reply or items, and says so. A card from another machine is read through the server that lists its
+session (`Session.server`), as the question on its screen is.
+
+Server data, one additive opt-in: `GET /api/sessions/:id/recap?full=1` adds `reply.full` - the whole
+text of the reply `reply.text` condenses, markdown as the agent wrote it, capped at 65536 characters
+(`lib/recap.js` `buildRecap(turns, {fullReply: true})`). Claude writes each content block of ONE API
+message on its own transcript line, so the blocks of a message are one reply: assistant turns now carry
+`messageId` (`message.id`, when the line has one; Codex has none), and `reply.full` joins the text
+blocks that share the reply's id, oldest first, blank-line separated; a turn with no id is its own
+reply. Without `full=1` or `full=true` (any other value, empty or repeated, included) the recap's shape is exactly as before, and Mission
+Control's Ask and "Tell it" never ask for it. A server older than 1.138.0 ignores the flag: the sheet
+then shows the condensed reply and labels it "the short form". The station and stage come from
+`GET /api/mc/subjects/:key` (read per item, 4 s each: an item whose page cannot be read still shows, without
+where it stands).

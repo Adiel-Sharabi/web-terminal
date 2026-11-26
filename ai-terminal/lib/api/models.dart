@@ -2559,9 +2559,14 @@ class SessionRecap {
 
 /// One quoted piece of the conversation: the text plus when it happened.
 class RecapEntry {
-  const RecapEntry({required this.text, this.at, this.isSummary = false});
+  const RecapEntry({required this.text, this.at, this.isSummary = false, this.full});
 
   final String text;
+
+  /// #571 - the reply's whole text, markdown as the agent wrote it, when it was asked for
+  /// (`recap?full=1`) and the server could give it; null otherwise ([text] is then all there is,
+  /// a condensed reminder). Only ever on a [SessionRecap.reply].
+  final String? full;
 
   /// ISO-8601 timestamp from the transcript, or null when the line had none.
   final String? at;
@@ -2575,10 +2580,12 @@ class RecapEntry {
     if (v is! Map) return null;
     final text = (v['text'] ?? '').toString();
     if (text.isEmpty) return null;
+    final full = v['full'];
     return RecapEntry(
       text: text,
       at: v['at']?.toString(),
       isSummary: v['isSummary'] == true,
+      full: full is String && full.trim().isNotEmpty ? full : null,
     );
   }
 }
