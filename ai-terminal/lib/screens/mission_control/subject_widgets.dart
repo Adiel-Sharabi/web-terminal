@@ -22,7 +22,7 @@ class McStageTrack extends StatelessWidget {
   Widget build(BuildContext context) {
     final at = mcStageIndex(order, stage.current);
     return Semantics(
-      label: stage.current == null ? 'no stage yet' : 'stage ${mcStageLabel(stage.current!)}',
+      label: stage.label == null ? 'no stage yet' : 'stage ${stage.label}',
       child: SizedBox(
         height: 6,
         child: Row(children: [
@@ -118,10 +118,9 @@ class McSubjectRow extends StatelessWidget {
       ?s.area,
       if (meta?.createdBy != null) 'by ${meta!.createdBy}',
     ].join(' · ');
-    final current = s.stage.current;
     final waits = mcWaitsText(s);
     final step = [
-      current == null ? 'no stage yet' : mcStageLabel(current),
+      s.stage.label ?? 'no stage yet',
       ?waits,
     ].join(' · ');
     final age = mcSubjectAge(s, now: now);

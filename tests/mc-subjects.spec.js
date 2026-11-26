@@ -252,6 +252,36 @@ test.describe('#504 what a subject waits on, and the one bucket rule', () => {
 });
 
 test.describe('#505 a subject\'s stage', () => {
+  test("#569 an ADO item's station caps the stage the view shows and is exposed; the stored history is not rewritten", () => {
+    const projects = pj.validateProjects([{ id: 'video', name: 'Video', match: { adoProjects: ['Contoso'] }, areas: { source: 'none' } }]).projects;
+    const mk = (id, over = {}) => meta(id, { tracker: 'ado', adoProject: 'Contoso', ...over });
+    const store = memStore();
+    // Their sessions reported merged when the PR merged into the feature branch; the station says otherwise.
+    const rows = ['ado:1', 'ado:2', 'ado:3'].map((k) => row('alpha', { items: [{ ref: k, key: k, stage: 'merged' }], reportAt: NOW - 10 * MIN }));
+    const metaByKey = { 'ado:1': mk('ado:1', { state: 'Parked', prs: [{ number: 5, state: 'merged' }] }), 'ado:2': mk('ado:2', { state: 'Reopen' }),
+      'ado:3': mk('ado:3', { state: 'Merged' }) };
+    const v = view({ rows, metaByKey, projects, stageStore: store });
+    const by = Object.fromEntries(v.subjects.map((s) => [s.key, s.stage]));
+    expect(by['ado:1']).toMatchObject({ current: 'in-review', station: 'Parked', reported: 'merged' });
+    expect(by['ado:2']).toMatchObject({ current: 'fixing', station: 'Reopen' });
+    expect(by['ado:3']).toMatchObject({ current: 'merged', station: 'Merged' });
+    expect(by['ado:1'].history.map((h) => h.stage)).not.toContain('merged');
+    // Stored whole: a station that moves on lifts the cap with nothing lost.
+    expect(store.h.get('ado:1').map((h) => h.stage)).toContain('merged');
+    // The project's stage counts follow what is shown.
+    const pv = pj.projectsView({ projects, sessions: [], subjects: v.subjects }, { platform: 'win32' });
+    expect(pv.find((p) => p.id === 'video').counts.stages).toMatchObject({ fixing: 1, 'in-review': 1, merged: 1 });
+    const later = view({ rows, metaByKey: { ...metaByKey, 'ado:1': mk('ado:1', { state: 'Merged' }) }, projects, stageStore: store });
+    expect(later.subjects.find((s) => s.key === 'ado:1').stage).toMatchObject({ current: 'merged', station: 'Merged' });
+  });
+
+  test('#569 a GitHub item keeps the generic stage and has no station', () => {
+    const k = 'acme/widgets#42';
+    const v = view({ rows: [row('alpha', { items: [{ ref: k, key: k, stage: 'merged' }], reportAt: NOW - 10 * MIN })],
+      metaByKey: { [k]: meta(k, { tracker: 'github', state: 'Parked' }) } });
+    expect(v.subjects[0].stage).toMatchObject({ current: 'merged', station: null });
+  });
+
   test('a merged PR shows Merged even if the agent last said fixing; the history is stored', () => {
     const k = 'acme/widgets#42';
     const store = memStore();
@@ -268,7 +298,7 @@ test.describe('#505 a subject\'s stage', () => {
   test('a report without a stage still renders: no stage, every other field there', () => {
     const v = view({ rows: [row('alpha', { items: [{ ref: 'ado:3', title: 'Old agent' }] })], metaByKey: {} });
     const s = v.subjects[0];
-    expect(s.stage).toEqual({ current: null, reported: null, evidence: null, history: [] });
+    expect(s.stage).toEqual({ current: null, reported: null, evidence: null, station: null, history: [] });
     expect(s).toMatchObject({ key: 'ado:3', ref: 'ado:3', title: 'Old agent', meta: null });
     expect(s.sessions[0].lastReport).toMatchObject({ state: 'in-progress', stage: null });
   });
