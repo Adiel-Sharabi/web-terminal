@@ -4,7 +4,7 @@
 //     `line`, `GET /api/mc/lines`, junk tolerated;
 //   * Now shows one card per line (project as a label, counts, stage bar) and falls back
 //     to the projects when `lines` is absent;
-//   * the Lines tab opens a line's subjects (`GET /api/mc/subjects?line=<id>`);
+//   * a line tapped on Now opens its subjects (`GET /api/mc/subjects?line=<id>`);
 //   * the subject screen names its line and "Move to line..." sends the right body for a
 //     pick, a new name and back to automatic, and shows a refusal's text;
 //   * Start work sends `line` or `lineName`, never both, and no picker without lines.
@@ -379,7 +379,7 @@ void main() {
     });
   });
 
-  group('Lines tab', () {
+  group('Line pages (no Lines tab)', () {
     testWidgets('a line tapped on Now opens its subjects (read by ?line=), a row opens the subject', (tester) async {
       await _size(tester, const Size(1400, 2400));
       final auth = _Authority();
@@ -401,22 +401,29 @@ void main() {
       await tester.pageBack();
       await tester.pumpAndSettle();
       expect(find.byType(McLineScreen), findsOneWidget);
+      // No Lines tab (2026-11-26): Back from the line returns to Now, never to a list no tab shows.
+      await tester.pageBack();
+      await tester.pumpAndSettle();
+      expect(find.byType(McLineScreen), findsNothing);
+      expect(find.byKey(const ValueKey('mc-projects-tab')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-line-$_hunt')), findsOneWidget, reason: "Now's own list of lines");
+      // ...and the next line tapped opens again.
+      await tester.tap(find.byKey(const ValueKey('mc-line-$_hunt')));
+      await tester.pumpAndSettle();
+      expect(find.byType(McLineScreen), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 
-    testWidgets('the tab is labelled Lines and lists the lines, filtered by project chips', (tester) async {
+    testWidgets('there is no Lines tab; Now lists the lines', (tester) async {
       await _size(tester, const Size(1400, 2400));
       final feed = _Authority().feed();
       addTearDown(feed.dispose);
       await tester.pumpWidget(_home(feed));
       await feed.refresh();
       await tester.pumpAndSettle();
-      expect(find.text('Projects'), findsNothing);
-      await tester.tap(find.text('Lines'));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('mc-projects-tab')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-nav-projects')), findsNothing);
+      expect(find.byKey(const ValueKey('mc-projects-tab')), findsNothing);
       expect(find.byKey(const ValueKey('mc-line-$_hunt')), findsOneWidget);
-      expect(find.byKey(const ValueKey('mc-lines-filter-all')), findsNothing, reason: 'one project: no chips');
       await tester.pumpWidget(const SizedBox());
     });
 
