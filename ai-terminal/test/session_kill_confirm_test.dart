@@ -254,6 +254,7 @@ void main() {
                   _session(),
                   onChanged: () => changed++,
                   canClearWait: false,
+                  canMove: false,
                   api: api(),
                 ),
                 child: const Text('open'),

@@ -46,6 +46,7 @@ import '../theme/status_colors.dart';
 import '../util/agent_turn.dart';
 import '../util/attach_overlap.dart';
 import '../util/scrollback_window.dart';
+import '../util/session_tree.dart';
 import '../util/terminal_links.dart';
 import '../util/terminal_tail.dart';
 import '../widgets/attach_source_sheet.dart';
@@ -4486,6 +4487,10 @@ class _SessionScreenState extends State<SessionScreen>
                   showNotifyLevelPicker(context, session, onChanged: onChanged);
                 case 'clearwait':
                   clearSessionWait(context, session, onChanged: onChanged);
+                case 'move':
+                  promptAndMoveSession(context, session, onChanged: onChanged);
+                case 'handover':
+                  promptAndHandOverChildren(context, session, onChanged: onChanged);
               }
             },
             itemBuilder: (context) => [
@@ -4512,6 +4517,12 @@ class _SessionScreenState extends State<SessionScreen>
               const PopupMenuItem(value: 'rename', child: Text('Rename')),
               const PopupMenuItem(value: 'kill', child: Text('Kill')),
               const PopupMenuItem(value: 'notify', child: Text('Notify level')),
+              // #558 - who this session is drawn under, and handing its children on.
+              if (SessionRepository.instance.canMoveSession(session))
+                const PopupMenuItem(value: 'move', child: Text('Move under...')),
+              if (SessionRepository.instance.canMoveSession(session) &&
+                  SessionTree(SessionRepository.instance.current).childrenOf(session).isNotEmpty)
+                const PopupMenuItem(value: 'handover', child: Text('Hand sub-sessions to...')),
               // #327: the only way to this on the session screen was the sheet
               // the entries above no longer open. Last, so the entries above
               // keep their position whether or not it is offered.

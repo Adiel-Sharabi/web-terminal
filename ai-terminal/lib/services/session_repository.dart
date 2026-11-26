@@ -178,6 +178,9 @@ class SessionRepository {
   /// Per-server `inbox-digest` capability (#383), from the same call.
   final Map<String, bool> _digestSupported = <String, bool>{};
 
+  /// Per-server `session-parent` capability (#558), from the same call.
+  final Map<String, bool> _parentSupported = <String, bool>{};
+
   // Live `/ws/notify` subscriptions, keyed by server base URL, alongside the
   // exact [ServerConfig] each was opened with (to detect a token change).
   // Re-synced from [AppConfig.serversStream] as servers are added/removed.
@@ -388,6 +391,16 @@ class SessionRepository {
   /// Whether the server at [baseUrl] writes an AI summary of a wait
   /// (`GET /api/sessions/:id/digest`, #383). An older one has no such route.
   bool supportsDigest(String baseUrl) => _digestSupported[baseUrl] ?? false;
+
+  /// THE rule for offering "Move under..." and "Hand sub-sessions to..." (#558): the
+  /// server that OWNS [s] stores its parent and must advertise the route. An older one
+  /// would 404, which must never read as "that session is gone".
+  bool canMoveSession(Session s) => _parentSupported[s.server.baseUrl] ?? false;
+
+  /// Test-only: marks the server at [baseUrl] as advertising `session-parent`.
+  @visibleForTesting
+  void debugSetParentSupported(String baseUrl, bool supported) =>
+      _parentSupported[baseUrl] = supported;
 
   /// THE rule for offering "Hand off" (#340): the server named this session a candidate
   /// (`handoff.suggest` - it owns the context threshold and the task-boundary gates),
@@ -1264,6 +1277,7 @@ class SessionRepository {
       _leasesSupported[server.baseUrl] = info.has('leases');
       _handoffSupported[server.baseUrl] = info.has('session-handoff');
       _digestSupported[server.baseUrl] = info.has('inbox-digest');
+      _parentSupported[server.baseUrl] = info.has('session-parent');
       final color = info.serverColor;
       if (color != null) _serverColor[server.baseUrl] = color;
       _namesResolved.add(server.baseUrl);

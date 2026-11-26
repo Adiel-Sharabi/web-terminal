@@ -49,6 +49,7 @@ void main() {
                   onChanged: () {},
                   // the tallest sheet: every optional row present
                   canClearWait: true,
+                  canMove: true,
                 ),
                 child: const Text('open'),
               ),
