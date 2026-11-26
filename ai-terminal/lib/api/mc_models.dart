@@ -1390,3 +1390,286 @@ class McMoveResult {
     return McMoveResult(subject: _str(m['subject']), line: McLineRef.fromJson(m['line']));
   }
 }
+
+// --- Efforts (#561): `GET /api/mc/efforts`, the Running home ---------------------------------
+//
+// One effort per lead session tree, and below them the work nobody runs. The server owns every
+// rule (state, order, verdicts, the not-running classes: `lib/mc-efforts.js`); a state, a verdict
+// kind or a class this app does not know is kept as sent and shown as its own words.
+
+/// What the supervisor (or the session's own check-in) says about a wait: `legit`, `suspect` or
+/// `unknown`; [rule] names the supervisor rule (`R1`.. or `check-in`); [text] is its words.
+class McVerdict {
+  final String kind;
+  final String? rule;
+  final String? text;
+  final DateTime? at;
+  const McVerdict({required this.kind, this.rule, this.text, this.at});
+
+  /// Null when it names no kind: a verdict that says nothing is no verdict.
+  static McVerdict? fromJson(dynamic json) {
+    final m = _map(json);
+    final kind = _str(m['kind']);
+    return kind == null ? null : McVerdict(kind: kind, rule: _str(m['rule']), text: _str(m['text']), at: _at(m['at']));
+  }
+
+  bool get isSuspect => kind == 'suspect';
+  bool get isLegit => kind == 'legit';
+
+  /// The line the card shows: `legit: <text>`, `suspect: <text>`, or `unknown` alone.
+  String get line => text == null ? kind : '$kind: $text';
+}
+
+/// One session of an effort's tree, in the server's order; [depth] is how far under the lead.
+class McEffortSession {
+  final String id;
+  final String? server;
+  final String? name;
+  final String? status;
+  final bool closed;
+  final DateTime? closedAt;
+  final String? parentId;
+  final int depth;
+  final McWait? wait;
+  final McVerdict? verdict;
+  const McEffortSession({
+    required this.id,
+    this.server,
+    this.name,
+    this.status,
+    this.closed = false,
+    this.closedAt,
+    this.parentId,
+    this.depth = 0,
+    this.wait,
+    this.verdict,
+  });
+
+  static McEffortSession? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McEffortSession(
+      id: id,
+      server: _str(m['server']),
+      name: _str(m['name']),
+      status: _str(m['status']),
+      closed: _bool(m['closed']),
+      closedAt: _at(m['closedAt']),
+      parentId: _str(m['parentId']),
+      depth: _count(m['depth']),
+      wait: McWait.fromJson(m['wait']),
+      verdict: McVerdict.fromJson(m['verdict']),
+    );
+  }
+
+  String get label => name ?? id;
+}
+
+/// A work item an effort carries (its [stage], and for an Azure DevOps item its [station]).
+class McEffortItem {
+  final String key;
+  final String? ref;
+  final String? title;
+  final String? stage;
+  final String? station;
+  final String? waitsOn;
+  const McEffortItem({required this.key, this.ref, this.title, this.stage, this.station, this.waitsOn});
+
+  static McEffortItem? fromJson(dynamic json) {
+    final m = _map(json);
+    final key = _str(m['key']);
+    if (key == null) return null;
+    return McEffortItem(
+        key: key, ref: _str(m['ref']), title: _str(m['title']), stage: _str(m['stage']), station: _str(m['station']), waitsOn: _str(m['waitsOn']));
+  }
+
+  String get refLabel => ref ?? key;
+
+  /// Where it stands, in words: the station as the tracker names it, else the stage, else null.
+  String? get stateLabel => station ?? (stage == null ? null : mcStageLabel(stage!));
+}
+
+/// One lead session tree: what is running, what it does, whether it needs the person.
+class McEffort {
+  final String id;
+  final String name;
+  final String? server;
+  final List<String> machines;
+  final DateTime? startedAt;
+  final DateTime? lastActivity;
+
+  /// `needs-you`, `stuck`, `moving`, `waiting` - or a newer one, kept as sent.
+  final String state;
+  final String? doing;
+  final McVerdict? verdict;
+  final List<McEffortSession> sessions;
+  final List<McEffortItem> items;
+
+  /// The cards Answer now shows for this tree's sessions: a possible ask or a maybe-answered one
+  /// is listed here but does not make the effort `needs-you`.
+  final List<McCard> needsYou;
+
+  /// How many of the person's own to-dos (an action wait) this tree holds: they are on My to-do, not
+  /// under the effort, but they make it `needs-you`.
+  final int todoCount;
+
+  /// A lead whose parent nobody listed while a server did not answer: [missing] names those.
+  final bool partial;
+  final List<String> missing;
+
+  const McEffort({
+    required this.id,
+    required this.name,
+    this.server,
+    this.machines = const [],
+    this.startedAt,
+    this.lastActivity,
+    this.state = 'waiting',
+    this.doing,
+    this.verdict,
+    this.sessions = const [],
+    this.items = const [],
+    this.needsYou = const [],
+    this.todoCount = 0,
+    this.partial = false,
+    this.missing = const [],
+  });
+
+  static McEffort? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    return McEffort(
+      id: id,
+      name: _str(m['name']) ?? id,
+      server: _str(m['server']),
+      machines: _strings(m['machines']),
+      startedAt: _at(m['startedAt']),
+      lastActivity: _at(m['lastActivity']),
+      state: _str(m['state']) ?? 'waiting',
+      doing: _str(m['doing']),
+      verdict: McVerdict.fromJson(m['verdict']),
+      sessions: _firstOf(_list(m['sessions'], McEffortSession.fromJson), (s) => s.id),
+      items: _firstOf(_list(m['items'], McEffortItem.fromJson), (i) => i.key),
+      needsYou: _firstOf(_list(m['needsYou'], McCard.fromJson), (c) => c.id),
+      todoCount: _count(m['todoCount']),
+      partial: _bool(m['partial']),
+      missing: _strings(m['missing']),
+    );
+  }
+
+  bool get isNeedsYou => state == 'needs-you';
+
+  /// The sessions still running (a closed one stays in [sessions] for the week's picture).
+  List<McEffortSession> get liveSessions => [for (final s in sessions) if (!s.closed) s];
+}
+
+/// A work item nobody runs; [cls] is the server's reading: `waits-test`, `not-started`,
+/// `stranded`, `finished` (or a newer one, kept as sent).
+class McIdleItem {
+  final String key;
+  final String? ref;
+  final String? title;
+  final String? stage;
+  final String? station;
+  final String cls;
+  final DateTime? updatedAt;
+  const McIdleItem({required this.key, this.ref, this.title, this.stage, this.station, this.cls = '', this.updatedAt});
+
+  static McIdleItem? fromJson(dynamic json) {
+    final m = _map(json);
+    final key = _str(m['key']);
+    if (key == null) return null;
+    return McIdleItem(
+        key: key,
+        ref: _str(m['ref']),
+        title: _str(m['title']),
+        stage: _str(m['stage']),
+        station: _str(m['station']),
+        cls: _str(m['cls']) ?? '',
+        updatedAt: _at(m['updatedAt']));
+  }
+
+  String get refLabel => ref ?? key;
+  String? get stateLabel => station ?? (stage == null ? null : mcStageLabel(stage!));
+}
+
+/// The not-running items of one line; [line] is null for the items on no line.
+class McIdleGroup {
+  final McLineRef? line;
+  final List<McIdleItem> items;
+  const McIdleGroup({this.line, this.items = const []});
+
+  static McIdleGroup? fromJson(dynamic json) {
+    final m = _map(json);
+    final items = _firstOf(_list(m['items'], McIdleItem.fromJson), (i) => i.key);
+    return items.isEmpty ? null : McIdleGroup(line: McLineRef.fromJson(m['line']), items: items);
+  }
+}
+
+/// One machine's chip in the header: [live] sessions out of [slots] (null: not read), [ok] false
+/// when it did not answer.
+class McMachineSlot {
+  final String name;
+  final int live;
+  final int working;
+  final int? slots;
+  final bool ok;
+  const McMachineSlot({required this.name, this.live = 0, this.working = 0, this.slots, this.ok = true});
+
+  static McMachineSlot? fromJson(dynamic json) {
+    final m = _map(json);
+    final name = _str(m['name']);
+    if (name == null) return null;
+    final slots = _int(m['slots']);
+    return McMachineSlot(
+        name: name,
+        live: _count(m['live']),
+        working: _count(m['working']),
+        slots: slots == null || slots <= 0 ? null : slots,
+        ok: m['ok'] != false);
+  }
+
+  /// `Home 4/10`, or `Home 4` when its limit was not read.
+  String get label => slots == null ? '$name $live' : '$name $live/$slots';
+}
+
+/// `GET /api/mc/efforts`.
+class McEfforts {
+  final List<McEffort> efforts;
+  final List<McIdleGroup> idle;
+  final List<McMachineSlot> machines;
+  final List<McServerState> servers;
+
+  /// False when a server did not answer: the view may be missing an effort.
+  final bool complete;
+  final DateTime? generatedAt;
+  const McEfforts(
+      {this.efforts = const [], this.idle = const [], this.machines = const [], this.servers = const [], this.complete = true, this.generatedAt});
+
+  static McEfforts fromJson(dynamic json) {
+    final m = _map(json);
+    return McEfforts(
+      efforts: _firstOf(_list(m['efforts'], McEffort.fromJson), (e) => e.id),
+      idle: _list(m['idle'], McIdleGroup.fromJson),
+      machines: _firstOf(_list(m['machines'], McMachineSlot.fromJson), (x) => x.name),
+      servers: _list(m['servers'], McServerState.fromJson),
+      complete: m['complete'] != false,
+      generatedAt: _at(m['generatedAt']),
+    );
+  }
+
+  /// How many items nobody runs, over every line.
+  int get idleCount => idle.fold(0, (n, g) => n + g.items.length);
+
+  /// The servers that did not answer.
+  List<String> get silent => [for (final s in servers) if (!s.ok) s.name];
+
+  McEffort? effort(String id) {
+    for (final e in efforts) {
+      if (e.id == id) return e;
+    }
+    return null;
+  }
+}

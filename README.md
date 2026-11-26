@@ -933,6 +933,19 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   chevron still unfolds a card in place; "More context" still asks a model. A reply the session has
   not written, or a read that failed, is a line saying so. Server: `GET /api/sessions/:id/recap?full=1`
   adds `reply.full` (the default recap is unchanged).
+- **The home is what runs (#561):** the companion's Mission Control home (Now) is the **Running** view when
+  the authority serves `GET /api/mc/efforts` (capability `mc-efforts`; an older authority keeps the Now
+  screen). One card per **effort** - a lead session and every session it started, on any machine - in
+  the server's order: needs you (oldest ask first), stuck, moving, waiting. A card says its state, its
+  machines, what it is doing now, the supervisor's verdict on its wait (`legit: ...`, `suspect: ...`, or
+  `unknown`, which the supervisor decides and Mission Control only shows; a suspect wait makes the effort
+  *stuck*), a strip of its work items (an Azure DevOps item shows its station) and, when a card waits for
+  you, Answer right there; tap it for its page (items, the session tree, what waits on you). One chip per
+  machine in the header says how full it is (`Home 4/10`). **My to-do** stays above. Below, folded, **Not
+  running (N)** lists the work nobody runs grouped by line (waits for test, not started, stranded,
+  finished), each with Start work; tap a line for its page. A machine that did not answer is said, and an
+  effort whose lead may live there is marked, never called gone. A wait on you that no effort carries
+  (the dispatcher's own, a closed tree) is shown above the efforts, never dropped. Server: `lib/mc-efforts.js`.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 - **Fleet usage ledger (#529):** what every Claude session on every machine cost - tokens and weighted units

@@ -24,12 +24,13 @@ Future<void> showStartWorkSheet(
   required McFeed feed,
   required void Function(String sessionId, Session? initial) onOpenSession,
   String? projectId,
+  List<String> subjectKeys = const [],
 }) async {
   final started = await showAppBottomSheet<McStartResult>(
     context: context,
     isScrollControlled: true,
     showDragHandle: false,
-    builder: (_) => McStartWorkSheet(feed: feed, projectId: projectId),
+    builder: (_) => McStartWorkSheet(feed: feed, projectId: projectId, subjectKeys: subjectKeys),
   );
   if (started != null) onOpenSession(started.sessionId, feed.startedSession(started));
 }
@@ -39,9 +40,13 @@ List<String> mcTypedRefs(String text) =>
     [for (final p in text.split(RegExp(r'[,\s]+'))) if (p.trim().isNotEmpty) p.trim()];
 
 class McStartWorkSheet extends StatefulWidget {
-  const McStartWorkSheet({super.key, required this.feed, this.projectId});
+  const McStartWorkSheet({super.key, required this.feed, this.projectId, this.subjectKeys = const []});
   final McFeed feed;
   final String? projectId;
+
+  /// #561 - work items to start on, from an item the Running home lists as not running: ticked
+  /// when the project's list has them, else put in the free field as typed refs.
+  final List<String> subjectKeys;
 
   @override
   State<McStartWorkSheet> createState() => _McStartWorkSheetState();
@@ -53,6 +58,9 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
   String? _project;
   bool _hunt = false;
   final Set<String> _ticked = {};
+
+  /// [McStartWorkSheet.subjectKeys] until the first list of the project has been read.
+  late List<String> _preselect = widget.subjectKeys;
   List<McSubject>? _subjects;
   String? _subjectsError;
   McMachines? _machines;
@@ -143,10 +151,19 @@ class _McStartWorkSheetState extends State<McStartWorkSheet> {
       if (!mounted || seq != _seq) return;
       // Only a tracker's work item can be started on: a subject of one session alone
       // (`<key>@<session id>`) names nothing the server could bind to.
-      setState(() => _subjects = [
-            for (final s in r.subjects)
-              if (s.inFilter(McSubjectFilter.active) && !s.key.contains('@')) s
-          ]);
+      final list = [
+        for (final s in r.subjects)
+          if (s.inFilter(McSubjectFilter.active) && !s.key.contains('@')) s
+      ];
+      // #561 - the item this sheet was opened on: ticked when listed, else typed in for the person to see.
+      final listed = {for (final s in list) s.key};
+      final rest = [for (final k in _preselect) if (!listed.contains(k)) k];
+      if (rest.isNotEmpty && _refs.text.isEmpty) _refs.text = rest.join(', ');
+      setState(() {
+        _subjects = list;
+        _ticked.addAll(_preselect.where(listed.contains));
+        _preselect = const [];
+      });
     } on ApiException catch (e) {
       if (mounted && seq == _seq) setState(() => _subjectsError = e.message);
     } catch (e) {

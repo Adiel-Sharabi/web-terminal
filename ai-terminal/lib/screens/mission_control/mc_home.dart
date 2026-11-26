@@ -43,6 +43,7 @@ import 'machines_view.dart';
 import 'now_view.dart';
 import 'project_view.dart';
 import 'question_panel.dart';
+import 'running_view.dart';
 import 'start_work_sheet.dart';
 
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
@@ -279,20 +280,40 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   }
 
   /// A line tapped on Now: that line's page, over Now (#523).
-  void _openLine(McLine l) {
+  void _openLine(McLine l) => _openLineById(l.id);
+
+  void _openLineById(String lineId) {
     setState(() => _tab = McTab.projects);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openLine(l.id));
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openLine(lineId));
+  }
+
+  /// #561 - an effort tapped on the Running home: its page, over Running (Back returns to it).
+  void _openEffort(McEffort e) {
+    setState(() => _tab = McTab.projects);
+    WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openEffort(e.id));
   }
 
   Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
       ? const SizedBox.shrink()
       : switch (tab) {
-        McTab.now => McNowView(
-            feed: _feed,
-            onAnswer: _answer,
-            onOpenSession: _openSession,
-            onOpenProject: _openProject,
-            onOpenLine: _openLine),
+        // #561 - the Running home when the authority sends efforts; an older one keeps the Now screen.
+        McTab.now => ListenableBuilder(
+            listenable: _feed,
+            builder: (context, _) => _feed.efforts == null
+                ? McNowView(
+                    feed: _feed,
+                    onAnswer: _answer,
+                    onOpenSession: _openSession,
+                    onOpenProject: _openProject,
+                    onOpenLine: _openLine)
+                : McRunningView(
+                    feed: _feed,
+                    onAnswer: _answer,
+                    onOpenSession: _openSession,
+                    onOpenEffort: _openEffort,
+                    onOpenLine: _openLineById,
+                    onStartWork: (item, projectId) => _startWork(projectId: projectId, subjectKeys: [item.key])),
+          ),
         McTab.projects => McProjectsNavigator(
             key: _projects,
             feed: _feed,
@@ -352,9 +373,12 @@ class _MissionControlHomeState extends State<MissionControlHome> {
       );
 
   /// #512 - the one Start work entry point; [projectId] preselects a project.
-  void _startWork({String? projectId}) =>
+  void _startWork({String? projectId, List<String> subjectKeys = const []}) =>
       showStartWorkSheet(context,
-          feed: _feed, projectId: projectId, onOpenSession: (id, initial) => _openSession(id, initial: initial));
+          feed: _feed,
+          projectId: projectId,
+          subjectKeys: subjectKeys,
+          onOpenSession: (id, initial) => _openSession(id, initial: initial));
 
   List<Widget> _actions() => [
         if (_tab == McTab.now || _tab == McTab.projects)

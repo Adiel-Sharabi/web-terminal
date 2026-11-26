@@ -13,6 +13,11 @@
 //   * a transport failure is that server's answer, said when nobody else answers.
 // A failed refresh keeps the last answer on screen with the reason beside it: an older
 // list that says how old it is beats a blank one.
+//
+// #561 - beside Now the feed reads the efforts (`GET /api/mc/efforts`) from the server that
+// answered Now. A 404 is an authority without them: [efforts] stays null and the Now screen
+// is what shows (asked again after [kEffortsRetry], so an upgrade is picked up). Any other
+// failure keeps the last efforts on screen with [effortsMessage] saying why they are old.
 
 import 'dart:async';
 
@@ -21,6 +26,9 @@ import 'package:flutter/foundation.dart';
 import '../api/api_client.dart';
 import '../api/mc_models.dart';
 import '../api/models.dart';
+
+/// How long an authority that answered 404 to the efforts is left alone before it is asked again.
+const Duration kEffortsRetry = Duration(minutes: 5);
 
 enum McStatus {
   /// No answer yet.
@@ -87,6 +95,7 @@ class McFeed extends ChangeNotifier {
     required this.client,
     this.pollInterval = const Duration(seconds: 10),
     this.isForeground,
+    this.effortsRetry = kEffortsRetry,
   });
 
   /// The configured servers, read at every ask.
@@ -96,11 +105,17 @@ class McFeed extends ChangeNotifier {
   /// How often [now] is re-read while [active].
   final Duration pollInterval;
 
+  /// #561 - how long a server that answered 404 to the efforts is left alone ([kEffortsRetry]).
+  final Duration effortsRetry;
+
   /// Whether the app is in the foreground; a background app does not poll. Null: always.
   final bool Function()? isForeground;
 
   McStatus _status = McStatus.loading;
   McNow? _now;
+  McEfforts? _efforts;
+  String? _effortsMessage;
+  final Map<String, DateTime> _noEfforts = {};
   ServerConfig? _servedBy;
   String? _message;
   DateTime? _at;
@@ -119,6 +134,13 @@ class McFeed extends ChangeNotifier {
 
   /// The last answer, kept through a failed refresh (with [message] saying why it is old).
   McNow? get now => _now;
+
+  /// #561 - the last efforts the authority sent, kept through a failed read; null when it has
+  /// none (an older server, or not read yet): the Now screen shows then.
+  McEfforts? get efforts => _efforts;
+
+  /// Why [efforts] are old (their last read failed), or null.
+  String? get effortsMessage => _effortsMessage;
 
   /// The server that answered [now]; actions on a card go to it.
   ServerConfig? get servedBy => _servedBy;
@@ -252,7 +274,11 @@ class McFeed extends ChangeNotifier {
     Future<bool> tryOne(ServerConfig sv) async {
       asked.add(sv.baseUrl);
       try {
-        final now = await client(sv).mcNow();
+        final c = client(sv);
+        // Read beside Now: it never throws, so a failed Now leaves nothing unawaited.
+        final efforts = _readEfforts(sv, c);
+        final now = await c.mcNow();
+        _applyEfforts(sv, await efforts);
         _now = now;
         _at = DateTime.now();
         // An answer for a card the server no longer lists has done its work.
@@ -301,6 +327,42 @@ class McFeed extends ChangeNotifier {
         failures.isEmpty ? 'No server answered for Mission Control' : 'No server answered: ${failures.join('; ')}');
   }
 
+  /// #561 - the efforts of [sv], as (answer, unsupported, why not). A server that said 404 within
+  /// [kEffortsRetry] is not asked again. Never throws.
+  Future<(McEfforts?, bool, String?)> _readEfforts(ServerConfig sv, ApiClient c) async {
+    final skip = _noEfforts[sv.baseUrl];
+    if (skip != null && DateTime.now().isBefore(skip)) return (null, true, null);
+    try {
+      return (await c.mcEfforts(), false, null);
+    } on McPeerException {
+      return (null, false, 'it is not the Mission Control server');
+    } on ApiException catch (e) {
+      if (e.status != 404) return (null, false, e.message);
+      // The window starts where the ask was MADE: a poll that is skipped inside it must not slide
+      // it on (every 10 s poll would, and an upgraded server would never be asked again).
+      _noEfforts[sv.baseUrl] = DateTime.now().add(effortsRetry);
+      return (null, true, null);
+    } catch (e) {
+      return (null, false, 'unreadable answer');
+    }
+  }
+
+  void _applyEfforts(ServerConfig sv, (McEfforts?, bool, String?) r) {
+    final (efforts, unsupported, why) = r;
+    // Another server's efforts are never kept under this one's Now.
+    if (_servedBy != null && _servedBy!.baseUrl != sv.baseUrl) _efforts = null;
+    if (efforts != null) {
+      _noEfforts.remove(sv.baseUrl);
+      _efforts = efforts;
+      _effortsMessage = null;
+    } else if (unsupported) {
+      _efforts = null;
+      _effortsMessage = null;
+    } else {
+      _effortsMessage = _efforts == null ? null : 'Efforts could not be read: ${why ?? 'no answer'}';
+    }
+  }
+
   /// A failure keeps the last answer (if any) on screen, with the reason as [message].
   void _fail(McStatus status, String message) {
     if (_now != null && status == McStatus.unreachable) {
@@ -315,7 +377,11 @@ class McFeed extends ChangeNotifier {
     _now = now;
     _servedBy = by;
     _message = message;
-    if (now == null) _at = null;
+    if (now == null) {
+      _at = null;
+      _efforts = null;
+      _effortsMessage = null;
+    }
   }
 
   // --- actions on a card or a to-do: sent to the server that answered ------

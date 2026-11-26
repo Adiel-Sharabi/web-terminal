@@ -453,6 +453,14 @@ class ApiClient {
   /// What needs the person now (`GET /api/mc/now`).
   Future<McNow> mcNow() async => McNow.fromJson(await _mcGet('/api/mc/now'));
 
+  /// #561 - the efforts (one per lead session tree) and the work nobody runs (`GET /api/mc/efforts`).
+  /// A server without it answers 404; an answer with no `efforts` list is no efforts answer (status 0).
+  Future<McEfforts> mcEfforts() async {
+    final m = await _mcGet('/api/mc/efforts');
+    if (m['efforts'] is! List) throw const ApiException(0, 'the answer has no efforts');
+    return McEfforts.fromJson(m);
+  }
+
   /// Every project with its areas and counts (`GET /api/mc/projects`).
   Future<McProjects> mcProjects() async => McProjects.fromJson(await _mcGet('/api/mc/projects'));
 

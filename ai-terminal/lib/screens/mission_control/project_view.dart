@@ -22,6 +22,7 @@ import '../../services/mc_feed.dart';
 import '../../theme/app_theme.dart';
 import 'lines_view.dart';
 import 'now_view.dart';
+import 'running_view.dart' show McEffortScreen;
 import 'subject_screen.dart';
 import 'subject_widgets.dart';
 
@@ -99,6 +100,26 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
     nav.popUntil((r) => r.isFirst);
     nav.push(_subjectRouteOf(subjectKey));
   }
+
+  /// Shows effort [effortId]'s page, over the list (#561): from the Running home.
+  void openEffort(String effortId) {
+    final nav = _nav.currentState;
+    if (nav == null) return;
+    nav.popUntil((r) => r.isFirst);
+    nav.push(_effortRoute(effortId));
+  }
+
+  Route<void> _effortRoute(String effortId) => MaterialPageRoute<void>(
+        settings: RouteSettings(name: 'mc-effort/$effortId'),
+        builder: (context) => McEffortScreen(
+          feed: widget.feed,
+          effortId: effortId,
+          now: widget.now,
+          onAnswer: widget.onAnswer,
+          onOpenSession: widget.onOpenSession,
+          onOpenSubject: (key) => Navigator.of(context).push(_subjectRouteOf(key)),
+        ),
+      );
 
   Route<void> _subjectRoute(BuildContext context, McSubject s) => _subjectRouteOf(s.key, initial: s);
 
