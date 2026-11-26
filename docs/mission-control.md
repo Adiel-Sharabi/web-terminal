@@ -148,6 +148,17 @@ am8_core `.claude/wi-flow/flow.json`): Committed / Parked -> pr-open, Merged / R
 Done -> tested; every other state (New, Approved, In Progress, Reopen, More info required, Not
 Reproducible, Postponed) proves nothing. The furthest of the state and the PR evidence wins (a tie
 names the PR). A closed item that was given up (Removed) proves nothing by being closed.
+**Station (#569).** For an Azure DevOps item (`Meta.tracker` 'ado', read at least once) its STATION - the
+work item state as ADO names it (`Parked`, `Ready for test`, ...) - is the authority on how far its
+code got, over what a session reported or a pull request proves (a PR merged into a long-lived feature
+branch is not on mainline). `foldStage` exposes it as `stage.station` and holds the shown stage to
+`STATION_CAPS`: Committed and Parked show at most `in-review`, Reopen at most `fixing`; every other
+station caps nothing. The cap is applied when the view is built: the stored history keeps what was
+recorded (a station that moves on lifts the cap with nothing lost), while `stage.current`, the served
+`stage.history` and so `counts.stages` follow the cap. A GitHub item, or an item the tracker was never read
+for, has `station: null` and keeps the generic stage. The companion shows the station wherever it shows a
+stage label for an ADO item (a subject's row, the progress track), and leaves out the `reported` and
+`evidence` halves there: not what a session said or a PR proves, but the station.
 current = the furthest of the stored history, the reports and the evidence. A stage reached by a
 REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
 withdrawn when a fresh, complete read (no `error`, no `warning`) no longer proves it (a reopened item, another PR opened),
@@ -156,10 +167,11 @@ entry per stage, stage order, so its times need not ascend), each `{stage, at, s
 `at` is the report's time for a report, the time the server saw it for evidence. Every session's
 current stage on the subject is folded in, not only the newest.
 ```
-Stage = { current, reported, evidence, history: [{stage, at, source:'report'|'pr'|'tracker', detail}] }
+Stage = { current, reported, evidence, station: string|null, history: [{stage, at, source:'report'|'pr'|'tracker', detail}] }
 ```
 `reported` = the stage of the newest report on the subject that carries one; `evidence` = what the
-tracker proves now (null when nothing, or unread). All null for a subject nobody staged.
+tracker proves now (null when nothing, or unread); `station` (#569) = an ADO item's state as ADO names it
+(null for any other item), which also caps `current` and the served `history`. All null for a subject nobody staged.
 
 ## Subjects (#504) - `lib/mc-subjects.js`
 `GET /api/mc/subjects?project=&area=` -> `{subjects: [Subject], runs: [Run], waits: [{card: Card, subjects: [key]}], servers: [{name, ok}], stages: [id], generatedAt}`

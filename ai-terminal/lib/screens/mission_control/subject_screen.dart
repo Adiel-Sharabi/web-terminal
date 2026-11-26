@@ -363,10 +363,13 @@ class McProgressTrack extends StatelessWidget {
         if (!order.contains(h.stage)) h.stage,
       if (stage.current != null && !order.contains(stage.current)) stage.current!,
     }.toList();
-    final halves = [
-      if (stage.reported != null) 'reported ${mcStageLabel(stage.reported!)}',
-      if (stage.evidence != null) 'evidence ${mcStageLabel(stage.evidence!)}',
-    ].join(' · ');
+    // #569: an ADO item shows its station, not what a session reported or a pull request proves.
+    final halves = stage.station != null
+        ? ''
+        : [
+            if (stage.reported != null) 'reported ${mcStageLabel(stage.reported!)}',
+            if (stage.evidence != null) 'evidence ${mcStageLabel(stage.evidence!)}',
+          ].join(' · ');
     Widget line(String st, bool reached, bool current) {
       final steps = stage.stepsFor(st);
       return Padding(
@@ -402,7 +405,13 @@ class McProgressTrack extends StatelessWidget {
     }
 
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-      if (stage.current == null)
+      if (stage.station != null)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Text('Station: ${stage.station}',
+              key: const ValueKey('mc-stage-station'), style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w700)),
+        ),
+      if (stage.current == null && stage.station == null)
         Padding(
           padding: const EdgeInsets.only(bottom: 6),
           child: Text('No stage reported or seen yet.', style: muted),

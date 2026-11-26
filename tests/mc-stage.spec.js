@@ -152,7 +152,7 @@ test.describe('#505 evidence beats the report', () => {
   });
 
   test('no report and no evidence: no stage at all', () => {
-    expect(S.foldStage({ history: [], reports: [], meta: meta(), now: T0 }).stage).toEqual({ current: null, reported: null, evidence: null, history: [] });
+    expect(S.foldStage({ history: [], reports: [], meta: meta(), now: T0 }).stage).toEqual({ current: null, reported: null, evidence: null, station: null, history: [] });
   });
 
   test('a stage only the tracker proved is withdrawn when a fresh read no longer proves it; a reported one never is', () => {
@@ -188,5 +188,67 @@ test.describe('#505 evidence beats the report', () => {
   test('a stored history is cleaned: unknown stages and steps back dropped', () => {
     expect(S.cleanHistory([{ stage: 'fixing', at: 1, source: 'report' }, { stage: 'nope', at: 2 }, { stage: 'triage', at: 3 }, { stage: 'merged', at: 4, source: 'pr', detail: 'x' }]))
       .toEqual([{ stage: 'fixing', at: 1, source: 'report', detail: null }, { stage: 'merged', at: 4, source: 'pr', detail: 'x' }]);
+  });
+});
+
+test.describe("#569 an ADO item's station is the authority", () => {
+  const ado = (over = {}) => meta({ key: 'ado:25678', tracker: 'ado', ...over });
+  const fold = (m, reports = [], history = []) => S.foldStage({ history, reports, meta: m, now: T0 });
+  // What an old session saw: its PR merged into the feature branch, so it reported merged.
+  const merged = [{ stage: 'merged', at: T0 - 5, detail: 'reported by a session' }];
+
+  test('the station is the state as ADO names it, for ADO items only, and only once read', () => {
+    expect(S.stationOf(ado({ state: ' Parked ' }))).toBe('Parked');
+    expect(S.stationOf(ado({ state: 'Ready for test' }))).toBe('Ready for test');
+    expect(S.stationOf(ado({ state: 'x'.repeat(80) })).length).toBe(40);
+    // A GitHub item keeps the generic stage; so does an item the tracker was never read for.
+    expect(S.stationOf(meta({ tracker: 'github', state: 'Parked' }))).toBe(null);
+    expect(S.stationOf(ado({ fetchedAt: null }))).toBe(null);
+    expect(S.stationOf(ado({ state: null }))).toBe(null);
+    expect(S.stationOf(null)).toBe(null);
+  });
+
+  test('Parked is held to in-review: a session reported merged, the view says in-review and Parked', () => {
+    const f = fold(ado({ state: 'Parked', prs: [{ number: 7, state: 'merged' }] }), merged);
+    expect(f.stage).toMatchObject({ current: 'in-review', station: 'Parked', reported: 'merged', evidence: 'merged' });
+    // The view shows no merged step; the STORED history is untouched (it is what `changed` compares).
+    expect(f.stage.history.map((h) => h.stage)).toEqual([]);
+    expect(f.history.map((h) => h.stage)).toEqual(['merged']);
+  });
+
+  test('Committed is held to in-review too; Reopen to fixing', () => {
+    expect(fold(ado({ state: 'Committed' }), merged).stage.current).toBe('in-review');
+    const reopened = fold(ado({ state: 'Reopen' }), merged);
+    expect(reopened.stage).toMatchObject({ current: 'fixing', station: 'Reopen' });
+    expect(reopened.stage.history.map((h) => h.stage)).toEqual([]);
+    expect(reopened.history.map((h) => h.stage)).toEqual(['merged']);
+  });
+
+  test('a cap only lowers: a stage under it stays, and no stage stays none', () => {
+    expect(fold(ado({ state: 'Parked' }), [{ stage: 'in-review', at: T0 }]).stage.current).toBe('in-review');
+    expect(fold(ado({ state: 'Reopen' }), [{ stage: 'planned', at: T0 }]).stage.current).toBe('planned');
+    expect(fold(ado({ state: 'Reopen' })).stage).toMatchObject({ current: null, station: 'Reopen' });
+  });
+
+  test('every other station caps nothing but is still the station', () => {
+    for (const state of ['New', 'Approved', 'In Progress', 'More info required', 'Not Reproducible', 'Postponed', 'Merged', 'Ready for test', 'Done']) {
+      const f = fold(ado({ state, closed: state === 'Done' }), merged);
+      expect(f.stage.current, state).toBe(state === 'Done' ? 'tested' : 'merged');
+      expect(f.stage.station).toBe(state);
+    }
+  });
+
+  test('a GitHub item or an unread tracker is not capped, whatever its state is called', () => {
+    expect(fold(meta({ tracker: 'github', state: 'Parked' }), merged).stage).toMatchObject({ current: 'merged', station: null });
+    expect(fold(ado({ state: 'Parked', fetchedAt: null }), merged).stage).toMatchObject({ current: 'merged', station: null });
+    expect(fold(null, merged).stage.station).toBe(null);
+  });
+
+  test('the cap is lifted when the station moves on, and nothing was lost meanwhile', () => {
+    const parked = fold(ado({ state: 'Parked', prs: [{ number: 7, state: 'merged' }] }), merged);
+    expect(parked.stage.current).toBe('in-review');
+    const landed = S.foldStage({ history: parked.history, reports: [], meta: ado({ state: 'Merged' }), now: T0 + 1 });
+    expect(landed.stage).toMatchObject({ current: 'merged', station: 'Merged' });
+    expect(landed.stage.history.map((h) => h.stage)).toEqual(['merged']);
   });
 });
