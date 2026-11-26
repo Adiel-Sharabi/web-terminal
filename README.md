@@ -735,7 +735,11 @@ parent must be a live session on some reachable machine (404 otherwise), and nev
 itself or anything under it (409: a loop). `POST /api/sessions/:id/children/move`
 `{"to": "<id>" | null, "children": [ids]?}` hands a session's children (all, or the ones named)
 to another session; any server takes it and forwards each child's move to the machine that owns
-the child. The answer lists `moved` and `failed` (200 when all moved, 207 when only some did).
+the child (in parallel, 8 s at most per machine). The answer lists `moved`, `failed` and
+`unreachable` (machines that are offline or refuse this server's token: any children there were
+not moved, so the answer is 207, never a clean 200); 200 when all moved, 207 when only some did.
+A peer's own failure (its 401 for this server's token, a 5xx) is reported inside `failed` and
+never passed off as the answer's status.
 A server that can do this advertises the `session-parent` capability. An assigned parent survives
 a restart, beats the parent the session was opened with, and is kept by a hand-off successor.
 From a shell or an agent: `node scripts/wt-family.js parent <id|me> <id|me|none>`,

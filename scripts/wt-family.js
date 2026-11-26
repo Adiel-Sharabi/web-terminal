@@ -16,6 +16,7 @@
 // Transport and credential: scripts/wt-api.js.
 
 const { target, call } = require('./wt-api');
+const { familyOf } = require('../lib/session-family'); // the ONE family rule (aliases, loops)
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -71,18 +72,22 @@ async function main() {
     if (!Array.isArray(r.json.moved)) throw new Error(`HTTP ${r.status}: ${r.json.error || 'refused'}`);
     for (const m of r.json.moved) console.log(`moved   ${m.name || short(m.id)} (${m.server || 'here'})`);
     for (const f of r.json.failed) console.log(`FAILED  ${f.name || short(f.id)} (${f.server || 'here'}): ${f.error}`);
-    if (!r.json.moved.length && !r.json.failed.length) console.log('no children to move');
-    return r.json.failed.length ? 1 : 0;
+    const unseen = r.json.unreachable || [];
+    if (unseen.length) console.log(`NOT SEEN: ${unseen.join(', ')} (unreachable: any children there were not moved)`);
+    if (!r.json.moved.length && !r.json.failed.length && !unseen.length) console.log('no children to move');
+    return r.json.failed.length || unseen.length ? 1 : 0;
   }
   if (verb === 'show') {
     const id = idArg(rest[0] === undefined ? 'me' : rest[0]);
     const rows = await clusterRows(local);
-    const row = rows.find((s) => s.id === id);
-    if (!row) throw new Error(`no live session ${id} on any reachable server`);
+    const tree = familyOf(rows);
+    const node = tree.resolve(id);
+    if (!node) throw new Error(`no live session ${id} on any reachable server`);
+    const row = node.row;
     const pid = row.spawn && row.spawn.parentId;
-    const parent = pid && rows.find((s) => s.id === pid || (s.spawn && (s.spawn.replaces || []).includes(pid)));
-    const mine = [id, ...((row.spawn && row.spawn.replaces) || [])];
-    const kids = rows.filter((s) => s.spawn && mine.includes(s.spawn.parentId));
+    const up = tree.parentOf(node);
+    const parent = up && up.row;
+    const kids = tree.childrenOf(node).map((n) => n.row);
     console.log(`${row.name} (${short(id)}, ${row.server || 'here'})`);
     console.log(`  parent:   ${parent ? `${parent.name} (${short(parent.id)}, ${parent.server})` : pid ? `${short(pid)} (not live)` : 'none'}`);
     console.log(`  children: ${kids.length ? '' : 'none'}`);

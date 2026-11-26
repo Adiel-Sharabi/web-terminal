@@ -19,19 +19,21 @@ import 'mc_models.dart';
 import 'models.dart';
 import 'supervisor_models.dart';
 
+/// #558 - what a hand-over of a session's children did: how many moved, how many
+/// were refused, the first reason given, and the servers that could not be seen
+/// (any children there were NOT moved).
+class ChildrenMoveResult {
+  const ChildrenMoveResult({required this.moved, required this.failed, this.firstError, this.unreachable = const <String>[]});
+  final int moved;
+  final int failed;
+  final String? firstError;
+  final List<String> unreachable;
+}
+
 /// Uniform error type for every [ApiClient] operation.
 ///
 /// [status] is the HTTP status code, or `0` for transport-level failures
 /// (timeout, DNS, connection refused, malformed response).
-/// #558 - what a hand-over of a session's children did: how many moved, how many
-/// were refused or unreachable, and the first reason given.
-class ChildrenMoveResult {
-  const ChildrenMoveResult({required this.moved, required this.failed, this.firstError});
-  final int moved;
-  final int failed;
-  final String? firstError;
-}
-
 class ApiException implements Exception {
   /// HTTP status code, or `0` for a transport/timeout/parse failure.
   final int status;
@@ -979,9 +981,11 @@ class ApiClient {
   /// (`POST /api/sessions/:id/children/move`). The children may live on any
   /// server: this one forwards each move to the child's own. Some may move and
   /// some not (207, or one refusal's status), so the answer is read, not thrown.
+  /// A longer deadline than the default: the server waits on each peer (8 s at most,
+  /// in parallel), and a timeout here would read as a failure of moves that landed.
   Future<ChildrenMoveResult> moveChildren(String fromId, String? toId) async {
     final res = await _send('POST', '/api/sessions/$fromId/children/move',
-        body: {'to': toId}, alsoAccept: const {404, 409, 501, 502});
+        body: {'to': toId}, alsoAccept: const {400, 404, 409, 502}, timeout: const Duration(seconds: 30));
     final j = jsonDecode(res.body);
     if (j is! Map<String, dynamic> || j['moved'] is! List) {
       throw ApiException(res.statusCode, j is Map && j['error'] is String ? j['error'] as String : 'HTTP ${res.statusCode}');
@@ -991,6 +995,7 @@ class ApiClient {
       moved: (j['moved'] as List).length,
       failed: failed.length,
       firstError: failed.isEmpty ? null : failed.first['error']?.toString(),
+      unreachable: (j['unreachable'] as List? ?? const []).map((e) => e.toString()).toList(),
     );
   }
 

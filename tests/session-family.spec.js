@@ -163,6 +163,47 @@ test.describe('#558 childrenToMove - which sessions are handed over', () => {
     expect(F.moveStatus([], [{ status: 409 }])).toBe(409);
     expect(F.moveStatus([{}], [{ status: 409 }])).toBe(207);
     expect(F.moveStatus([], [{ status: 409 }, { status: 404 }])).toBe(502);
+    // A peer's own trouble is never passed off as this server's verdict on the request.
+    expect(F.moveStatus([], [{ status: 501 }])).toBe(502);
+    expect(F.moveStatus([], [{ status: 401 }])).toBe(502);
+    // A server that could not be seen makes the answer partial, never a clean 200.
+    expect(F.moveStatus([], [], ['Home'])).toBe(207);
+    expect(F.moveStatus([{}], [], ['Home'])).toBe(207);
+    expect(F.moveStatus([], [{ status: 409 }], ['Home'])).toBe(502);
+  });
+});
+
+test.describe('#558 forwarding a child to the server that owns it', () => {
+  const K = 'd0000000-0000-4000-8000-000000000001';
+  const URL = 'https://peer.example:7681';
+  const servers = [{ name: 'Peer', url: URL, online: true, capabilities: ['session-parent'] }];
+  const tokens = { [URL]: { token: 'T' } };
+
+  test("this server's own child is written here; a peer's goes to that peer with its token", () => {
+    expect(F.forwardPlan({ id: K, serverUrl: null }, servers, tokens)).toEqual({ local: true });
+    expect(F.forwardPlan({ id: K, serverUrl: URL }, servers, tokens)).toEqual({ url: `${URL}/api/sessions/${K}/parent`, token: 'T' });
+    expect(F.forwardPlan({ id: K, serverUrl: URL }, servers, { [URL]: 'S' })).toMatchObject({ token: 'S' });
+  });
+  test('fails closed: an old peer (no capability), no token, or an id that is not a session id', () => {
+    expect(F.forwardPlan({ id: K, serverUrl: URL }, [{ ...servers[0], capabilities: [] }], tokens)).toMatchObject({ fail: { status: 501 } });
+    expect(F.forwardPlan({ id: K, serverUrl: 'https://other:1' }, servers, tokens)).toMatchObject({ fail: { status: 501 } });
+    expect(F.forwardPlan({ id: K, serverUrl: URL }, servers, {})).toMatchObject({ fail: { status: 502 } });
+    expect(F.forwardPlan({ id: '../../exec', serverUrl: URL }, servers, tokens)).toMatchObject({ fail: { status: 502 } });
+  });
+  test("a peer's answer: refusals keep their reason, its 401 is OUR token, the rest is that server failing", () => {
+    expect(F.peerAnswer(200, JSON.stringify({ parentId: K }), null)).toEqual({ ok: true, parentId: K });
+    expect(F.peerAnswer(200, 'not json', K)).toEqual({ ok: true, parentId: K });
+    expect(F.peerAnswer(409, JSON.stringify({ error: 'loop' }), null)).toEqual({ ok: false, status: 409, error: 'loop' });
+    expect(F.peerAnswer(401, '{}', null)).toMatchObject({ ok: false, status: 502, error: expect.stringContaining('token') });
+    expect(F.peerAnswer(500, '', null)).toMatchObject({ ok: false, status: 502 });
+  });
+  test('the servers a hand-over could not see: offline or refusing our token, never this one', () => {
+    expect(F.unreachableServers([
+      { name: 'Here', url: null, online: true },
+      { name: 'Up', url: 'u', online: true, needsAuth: false },
+      { name: 'Down', url: 'd', online: false },
+      { name: 'Locked', url: 'l', online: true, needsAuth: true },
+    ])).toEqual(['Down', 'Locked']);
   });
 });
 

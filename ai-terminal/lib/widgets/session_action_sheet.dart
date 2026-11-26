@@ -316,15 +316,20 @@ Future<bool> promptAndHandOverChildren(
     final r = await client.moveChildren(session.id, pick.session?.id);
     onChanged();
     final where = pick.session == null ? 'the top level' : pick.session!.displayName;
-    messenger.showSnackBar(SnackBar(
-      content: Text(r.failed == 0
-          ? 'Moved ${r.moved} to $where'
-          : 'Moved ${r.moved} to $where; ${r.failed} not moved: ${r.firstError ?? 'refused'}'),
-    ));
+    messenger.showSnackBar(SnackBar(content: Text(handOverSummary(r, where))));
   } catch (e) {
     messenger.showSnackBar(SnackBar(content: Text('Hand-over failed: ${e is ApiException ? e.message : e}')));
   }
   return true;
+}
+
+/// #558 - what a hand-over says it did: every part that did NOT happen is named - a
+/// refusal, and a machine that could not be seen (its sub-sessions were not moved).
+String handOverSummary(ChildrenMoveResult r, String where) {
+  final parts = <String>['Moved ${r.moved} to $where'];
+  if (r.failed > 0) parts.add('${r.failed} not moved: ${r.firstError ?? 'refused'}');
+  if (r.unreachable.isNotEmpty) parts.add('could not reach ${r.unreachable.join(', ')}: any sub-sessions there were not moved');
+  return parts.join('; ');
 }
 
 /// One row per session id: two server entries reaching the same box (a LAN and a

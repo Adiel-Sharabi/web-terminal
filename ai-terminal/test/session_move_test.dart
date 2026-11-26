@@ -88,7 +88,7 @@ void main() {
   testWidgets('Hand sub-sessions: the whole subtree is excluded; a partial move says what failed', (tester) async {
     reply = (_) => http.Response(
         jsonEncode({'moved': [], 'failed': [{'id': 'K', 'status': 501, 'error': 'that server cannot move sessions yet (update it)'}]}),
-        501, headers: {'content-type': 'application/json'});
+        502, headers: {'content-type': 'application/json'});
     await pump(tester, (c) => promptAndHandOverChildren(c, lead, onChanged: () {}, api: api(), sessions: all));
     for (final id in ['L', 'K', 'G']) {
       expect(find.byKey(ValueKey('parent-picker-$id')), findsNothing, reason: '$id is the session or under it');
@@ -97,6 +97,23 @@ void main() {
     await tester.pumpAndSettle();
     expect(sent.map(req), ['POST /api/sessions/L/children/move {"to":"X"}']);
     expect(find.textContaining('1 not moved: that server cannot move sessions yet'), findsOneWidget);
+  });
+
+  test('the hand-over summary names every part that did not happen', () {
+    expect(handOverSummary(const ChildrenMoveResult(moved: 2, failed: 0), 'Lead'), 'Moved 2 to Lead');
+    expect(handOverSummary(const ChildrenMoveResult(moved: 1, failed: 1, firstError: 'loop'), 'Lead'),
+        'Moved 1 to Lead; 1 not moved: loop');
+    expect(handOverSummary(const ChildrenMoveResult(moved: 1, failed: 0, unreachable: ['Home']), 'Lead'),
+        'Moved 1 to Lead; could not reach Home: any sub-sessions there were not moved');
+  });
+
+  testWidgets('Hand sub-sessions: an unreachable machine is named, not hidden behind "Moved"', (tester) async {
+    reply = (_) => http.Response(jsonEncode({'moved': [{'id': 'K'}], 'failed': [], 'unreachable': ['Home']}), 207,
+        headers: {'content-type': 'application/json'});
+    await pump(tester, (c) => promptAndHandOverChildren(c, lead, onChanged: () {}, api: api(), sessions: all));
+    await tester.tap(find.byKey(const ValueKey('parent-picker-X')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('could not reach Home'), findsOneWidget);
   });
 
   // One sheet per test: a second pump keeps the first sheet open over the button.

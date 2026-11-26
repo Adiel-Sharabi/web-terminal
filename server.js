@@ -10494,8 +10494,15 @@ function reparentLocal(id, parentId, rows, localIds) {
   return { status: 200, json: { id, parentId: parent, spawn: spawnStore.field(id) } };
 }
 
-/** The family's inputs: every live session in the cluster, and this server's own ids. */
+/** A forwarded move's deadline per peer. The peer re-reads its own cluster view before it
+ *  answers (each of ITS peers bounded at 3 s), and the client waits 30 s for the whole hand-over. */
+const FAMILY_PEER_TIMEOUT_MS = 8000;
+
+/** The family's inputs: every live session in the cluster, and this server's own ids. The
+ *  cluster view is read FRESH: a move on another server a moment ago must be seen, or two
+ *  crossed moves inside the cache's 1.5 s would make a loop each one alone refuses. */
 async function familyRows(req) {
+  invalidateClusterSessionsCache();
   const [cluster, local] = await Promise.all([cachedClusterSessions(clusterReqUser(req)), workerClient.rpc('listSessions')]);
   return { rows: cluster.sessions || [], servers: cluster.servers || [], localIds: new Set(local.sessions.map((s) => s.id)) };
 }
@@ -10539,47 +10546,43 @@ app.post('/api/sessions/:id/children/move', express.json({ limit: '8kb' }), asyn
     if (target.id && tree.resolve(target.id) && tree.resolve(target.id) === tree.resolve(from)) {
       return res.status(400).json({ error: 'to is this session: its children are already under it' });
     }
+    // A server this one cannot see into lists no sessions, so its children of [from] are not
+    // here to move: the answer says so (207), never "all moved" over sessions left behind.
+    const unreachable = sessionFamily.unreachableServers(servers);
     const picked = sessionFamily.childrenToMove(tree, rows, from, only.ids);
-    if (!picked.ok) return res.status(picked.status).json({ error: picked.error });
+    if (!picked.ok) {
+      const unseen = unreachable.length ? ` (or it is on a server this one cannot reach: ${unreachable.join(', ')})` : '';
+      return res.status(picked.status).json({ error: picked.error + unseen, unreachable });
+    }
     const tokens = loadClusterTokens();
-    const moved = [];
-    const failed = [];
-    for (const child of picked.children) {
+    // In parallel, each peer bounded: one slow machine must not hold the answer past the
+    // client's deadline while the moves it waited on land anyway.
+    const results = await Promise.all(picked.children.map(async (child) => {
       const where = { id: child.id, name: child.name || null, server: child.server || null };
-      if (!child.serverUrl) {
+      const plan = sessionFamily.forwardPlan(child, servers, tokens);
+      if (plan.fail) return { ...where, ok: false, ...plan.fail };
+      if (plan.local) {
         const r = reparentLocal(child.id, target.id, rows, localIds);
-        if (r.status === 200) moved.push({ ...where, parentId: r.json.parentId });
-        else failed.push({ ...where, status: r.status, error: r.json.error });
-        continue;
+        return r.status === 200 ? { ...where, ok: true, parentId: r.json.parentId } : { ...where, ok: false, status: r.status, error: r.json.error };
       }
       // A child on a peer: that peer writes it, and checks the move against its own view.
-      // Its id came from the peer's own list and goes into a URL: a session id or nothing.
-      if (!_HOOK_UUID_RE.test(child.id)) { failed.push({ ...where, status: 502, error: 'that server listed a malformed session id' }); continue; }
-      const peer = servers.find((s) => s.url === child.serverUrl);
-      const entry = tokens[child.serverUrl];
-      const token = entry && (typeof entry === 'string' ? entry : entry.token);
-      if (!peer || !Array.isArray(peer.capabilities) || !peer.capabilities.includes('session-parent')) {
-        failed.push({ ...where, status: 501, error: 'that server cannot move sessions yet (update it)' });
-        continue;
-      }
-      if (!token) { failed.push({ ...where, status: 502, error: 'no token for that server' }); continue; }
       try {
-        const r = await clusterFetch(child.serverUrl + '/api/sessions/' + child.id + '/parent', {
+        const r = await clusterFetch(plan.url, {
           method: 'PATCH',
-          headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
+          headers: { Authorization: 'Bearer ' + plan.token, 'Content-Type': 'application/json' },
           body: JSON.stringify({ parentId: target.id }),
-          timeout: 15000,
+          timeout: FAMILY_PEER_TIMEOUT_MS,
         });
-        let j = {};
-        try { j = JSON.parse(r.body); } catch { /* not JSON: reported by its status alone */ }
-        if (r.status === 200) moved.push({ ...where, parentId: j.parentId ?? target.id });
-        else failed.push({ ...where, status: r.status, error: j.error || 'HTTP ' + r.status });
+        const a = sessionFamily.peerAnswer(r.status, r.body, target.id);
+        return a.ok ? { ...where, ok: true, parentId: a.parentId } : { ...where, ok: false, status: a.status, error: a.error };
       } catch (e) {
-        failed.push({ ...where, status: 502, error: 'server unreachable: ' + e.message });
+        return { ...where, ok: false, status: 502, error: 'server unreachable: ' + e.message };
       }
-    }
+    }));
+    const moved = results.filter((x) => x.ok).map(({ ok: _ok, ...x }) => x);
+    const failed = results.filter((x) => !x.ok).map(({ ok: _ok, ...x }) => x);
     invalidateClusterSessionsCache();
-    res.status(sessionFamily.moveStatus(moved, failed)).json({ from, to: target.id, moved, failed });
+    res.status(sessionFamily.moveStatus(moved, failed, unreachable)).json({ from, to: target.id, moved, failed, unreachable });
   } catch (e) {
     console.error('POST /api/sessions/:id/children/move failed: ' + e.message);
     res.status(500).json({ error: 'Failed to move the children' });
