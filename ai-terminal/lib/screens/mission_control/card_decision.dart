@@ -108,11 +108,14 @@ class McCardDetail extends StatelessWidget {
     required this.onPick,
     required this.onSend,
     this.enabled = true,
-  });
+  }) : assert(onSend == null || controller != null, 'a reply row needs its controller');
 
   /// Null for a possible unreported question (no options; the card's own line is the sentence).
   final BriefDecision? decision;
-  final TextEditingController controller;
+
+  /// The reply field's; null only where there is no reply row ([onSend] null), as on the context
+  /// sheet (#571), which shows the same detail read-only.
+  final TextEditingController? controller;
 
   /// A tap on an option; null: the card cannot answer, the rows only explain.
   final void Function(String label)? onPick;
@@ -170,7 +173,7 @@ class McCardDetail extends StatelessWidget {
           Expanded(
             child: TextField(
               key: const ValueKey('mc-card-reply-field'),
-              controller: controller,
+              controller: controller!,
               enabled: enabled,
               maxLines: 1,
               textInputAction: TextInputAction.send,
@@ -181,10 +184,10 @@ class McCardDetail extends StatelessWidget {
           const SizedBox(width: 8),
           // The row rebuilds with the field: Send is off until there are words.
           ListenableBuilder(
-            listenable: controller,
+            listenable: controller!,
             builder: (context, _) => FilledButton(
               key: const ValueKey('mc-card-reply-send'),
-              onPressed: enabled && controller.text.trim().isNotEmpty ? onSend : null,
+              onPressed: enabled && controller!.text.trim().isNotEmpty ? onSend : null,
               child: const Text('Send'),
             ),
           ),

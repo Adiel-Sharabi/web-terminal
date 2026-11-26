@@ -20,6 +20,7 @@ import '../../widgets/format_utils.dart';
 import '../../widgets/question_overlay.dart' show buildAnswerFrames;
 import '../../widgets/timed_snack_bar.dart';
 import 'answer_sheet.dart' show McAnswerPort;
+import 'card_context_sheet.dart' show McCardContextSheet;
 import 'card_decision.dart';
 import 'lines_view.dart';
 import 'question_panel.dart';
@@ -967,7 +968,10 @@ class _McAnswerCardState extends State<McAnswerCard> {
       margin: EdgeInsets.zero,
       clipBehavior: Clip.antiAlias,
       child: InkWell(
-        onTap: _expandable ? _toggle : null,
+        // #571: a tap opens the card's full context (the chevron still unfolds it in place).
+        onTap: questions?.contextPort != null
+            ? () => McCardContextSheet.open(context, card: c, port: questions!.contextPort!, now: widget.now)
+            : (_expandable ? _toggle : null),
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -1399,95 +1403,101 @@ class McActionCard extends StatelessWidget {
     // Told (a subject's card until its wait leaves the view): never offered again.
     final told = done != null && done.state == 'delivered';
     final unblocks = c.why.text;
+    final ctx = McQuestionScope.maybeOf(context)?.contextPort;
     return Card(
       margin: EdgeInsets.zero,
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(
-              child: Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-                if (c.project != null) McTag(projectName ?? c.project!),
-                const McTag('to do', muted: true),
-                if (where != null)
-                  Row(key: const ValueKey('mc-action-where'), mainAxisSize: MainAxisSize.min, children: [
-                    const Icon(Icons.place_outlined, size: 14, color: AppColors.caution),
-                    const SizedBox(width: 2),
-                    Text(where, style: small?.copyWith(color: AppColors.caution, fontWeight: FontWeight.w600)),
-                  ]),
-              ]),
-            ),
-            if (age != null) ...[
-              const SizedBox(width: 8),
-              Text(age, style: muted),
-            ],
-          ]),
-          const SizedBox(height: 6),
-          Text(c.what ?? (heading.isEmpty ? 'Something to do' : heading),
-              key: const ValueKey('mc-action-what'),
-              style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
-          if (c.what != null && heading.isNotEmpty) Text(heading, style: muted),
-          if (steps.isNotEmpty) ...[
-            const SizedBox(height: 6),
-            for (var i = 0; i < steps.length; i++)
-              Padding(
-                key: ValueKey('mc-action-step-$i'),
-                padding: const EdgeInsets.only(bottom: 2),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SizedBox(width: 22, child: Text('${i + 1}.', style: muted)),
-                  Expanded(child: Text(steps[i], style: theme.textTheme.bodyMedium)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        // #571: a tap opens the card's full context.
+        onTap: ctx == null ? null : () => McCardContextSheet.open(context, card: c, port: ctx, now: now),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(
+                child: Wrap(spacing: 6, runSpacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+                  if (c.project != null) McTag(projectName ?? c.project!),
+                  const McTag('to do', muted: true),
+                  if (where != null)
+                    Row(key: const ValueKey('mc-action-where'), mainAxisSize: MainAxisSize.min, children: [
+                      const Icon(Icons.place_outlined, size: 14, color: AppColors.caution),
+                      const SizedBox(width: 2),
+                      Text(where, style: small?.copyWith(color: AppColors.caution, fontWeight: FontWeight.w600)),
+                    ]),
                 ]),
               ),
-          ],
-          if (unblocks != null) ...[
-            const SizedBox(height: 4),
-            Text('Done unblocks: ${unblocks.replaceFirst('blocks ', '')}',
-                key: const ValueKey('mc-action-why'), style: small?.copyWith(color: AppColors.caution)),
-          ],
-          if (session.isNotEmpty) Text(session, style: muted),
-          if (notTold != null) ...[
-            const SizedBox(height: 2),
-            Text(notTold, key: const ValueKey('mc-action-not-told'), style: small?.copyWith(color: AppColors.caution)),
-          ],
-          if (told) ...[
-            const SizedBox(height: 2),
-            Text('Done: its session was told to carry on.', key: const ValueKey('mc-action-told'), style: muted),
-          ],
-          if (maybeTold) ...[
-            const SizedBox(height: 2),
-            Text('Done was sent; it may have reached its session. It goes once the session carries on.',
-                key: const ValueKey('mc-action-maybe-told'), style: muted),
-          ],
-          const SizedBox(height: 4),
-          Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
-            if (!maybeTold && !told)
-              FilledButton.tonalIcon(
-                key: const ValueKey('mc-action-done'),
-                onPressed: onDone,
-                icon: const Icon(Icons.check, size: 18),
-                label: const Text('Done'),
-              ),
-            if (onOpenSession != null)
-              TextButton.icon(
-                onPressed: onOpenSession,
-                icon: const Icon(Icons.open_in_new, size: 18),
-                label: const Text('Open session'),
-              ),
-            PopupMenuButton<int>(
-              key: const ValueKey('mc-action-later'),
-              tooltip: 'Not now: hide it for a while; it comes back if the session still waits',
-              onSelected: onLater,
-              itemBuilder: (_) => [
-                for (final h in kMcLaterHours)
-                  PopupMenuItem(value: h, child: Text(h == 1 ? 'In an hour' : 'In $h hours')),
+              if (age != null) ...[
+                const SizedBox(width: 8),
+                Text(age, style: muted),
               ],
-              child: const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                child: Text('Not now', style: TextStyle(color: AppColors.primary)),
+            ]),
+            const SizedBox(height: 6),
+            Text(c.what ?? (heading.isEmpty ? 'Something to do' : heading),
+                key: const ValueKey('mc-action-what'),
+                style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+            if (c.what != null && heading.isNotEmpty) Text(heading, style: muted),
+            if (steps.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              for (var i = 0; i < steps.length; i++)
+                Padding(
+                  key: ValueKey('mc-action-step-$i'),
+                  padding: const EdgeInsets.only(bottom: 2),
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    SizedBox(width: 22, child: Text('${i + 1}.', style: muted)),
+                    Expanded(child: Text(steps[i], style: theme.textTheme.bodyMedium)),
+                  ]),
+                ),
+            ],
+            if (unblocks != null) ...[
+              const SizedBox(height: 4),
+              Text('Done unblocks: ${unblocks.replaceFirst('blocks ', '')}',
+                  key: const ValueKey('mc-action-why'), style: small?.copyWith(color: AppColors.caution)),
+            ],
+            if (session.isNotEmpty) Text(session, style: muted),
+            if (notTold != null) ...[
+              const SizedBox(height: 2),
+              Text(notTold, key: const ValueKey('mc-action-not-told'), style: small?.copyWith(color: AppColors.caution)),
+            ],
+            if (told) ...[
+              const SizedBox(height: 2),
+              Text('Done: its session was told to carry on.', key: const ValueKey('mc-action-told'), style: muted),
+            ],
+            if (maybeTold) ...[
+              const SizedBox(height: 2),
+              Text('Done was sent; it may have reached its session. It goes once the session carries on.',
+                  key: const ValueKey('mc-action-maybe-told'), style: muted),
+            ],
+            const SizedBox(height: 4),
+            Wrap(spacing: 4, crossAxisAlignment: WrapCrossAlignment.center, children: [
+              if (!maybeTold && !told)
+                FilledButton.tonalIcon(
+                  key: const ValueKey('mc-action-done'),
+                  onPressed: onDone,
+                  icon: const Icon(Icons.check, size: 18),
+                  label: const Text('Done'),
+                ),
+              if (onOpenSession != null)
+                TextButton.icon(
+                  onPressed: onOpenSession,
+                  icon: const Icon(Icons.open_in_new, size: 18),
+                  label: const Text('Open session'),
+                ),
+              PopupMenuButton<int>(
+                key: const ValueKey('mc-action-later'),
+                tooltip: 'Not now: hide it for a while; it comes back if the session still waits',
+                onSelected: onLater,
+                itemBuilder: (_) => [
+                  for (final h in kMcLaterHours)
+                    PopupMenuItem(value: h, child: Text(h == 1 ? 'In an hour' : 'In $h hours')),
+                ],
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Text('Not now', style: TextStyle(color: AppColors.primary)),
+                ),
               ),
-            ),
+            ]),
           ]),
-        ]),
+        ),
       ),
     );
   }

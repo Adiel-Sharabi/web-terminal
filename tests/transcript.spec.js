@@ -206,6 +206,16 @@ test.describe('lib/transcript.parseTranscriptTurn', () => {
     expect(turn).toEqual({ role: 'assistant', text: 'Hello there.', toolUses: [], ts: null, ctxTokens: null });
   });
 
+  // #571 - the recap's whole-reply field groups the blocks of one message by this id.
+  test('assistant turn carries the message id when the line has one, and no key when it has none', () => {
+    const withId = parseTranscriptTurn(jl({ type: 'assistant', message: { id: 'msg_01abc', role: 'assistant', content: [{ type: 'text', text: 'Hi.' }] } }));
+    expect(withId.messageId).toBe('msg_01abc');
+    expect(parseTranscriptTurn(asstLine([{ type: 'text', text: 'Hi.' }]))).not.toHaveProperty('messageId');
+    // A hand-edited file cannot make the id a way to carry bulk.
+    const huge = parseTranscriptTurn(jl({ type: 'assistant', message: { id: 'x'.repeat(101), role: 'assistant', content: [{ type: 'text', text: 'Hi.' }] } }));
+    expect(huge).not.toHaveProperty('messageId');
+  });
+
   test('assistant turn exposes ctxTokens = input + both cache tiers', () => {
     const turn = parseTranscriptTurn(asstLine([{ type: 'text', text: 'hi' }], {
       message: {

@@ -920,6 +920,15 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   panel, a decision by its options or your own words, a wait by a reply) through the existing
   server-typed answer path; **Ask about this** on the card puts a question to the Analyst, which now
   also reads the waiting session's last turns, so it can explain the terms the question uses.
+- **A card opens to its full context (#571):** tap a Mission Control card (a phone shows it full screen,
+  a desktop as a dialog) and read what is needed to answer it, in the session's own words: the
+  question or decision with its context and EACH option's consequence (the recommended one starred),
+  every work item the session names with its Azure DevOps station (or GitHub stage) and the state it
+  reported - tap one to open it - and the session's last reply IN FULL, markdown rendered (not the
+  TL;DR the card shows). **Answer** and **Open session** are there too, on the card's own paths. The
+  chevron still unfolds a card in place; "More context" still asks a model. A reply the session has
+  not written, or a read that failed, is a line saying so. Server: `GET /api/sessions/:id/recap?full=1`
+  adds `reply.full` (the default recap is unchanged).
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 - **Fleet usage ledger (#529):** what every Claude session on every machine cost - tokens and weighted units

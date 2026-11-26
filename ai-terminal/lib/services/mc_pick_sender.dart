@@ -33,6 +33,20 @@ import '../util/needs_you.dart' show replyStillWanted;
 import '../widgets/question_overlay.dart' show AnswerFrame, buildAnswerFrames;
 import 'needs_you_actions.dart';
 
+/// The session [card] is about among [sessions], or null when it is not known or not one session.
+/// A cluster peer's name and this app's name for that server can differ in case. The ONE lookup:
+/// the pick sender writes to this session and the card's context sheet (#571) reads it.
+Session? mcSessionOfCard(Iterable<Session> sessions, McCard card) {
+  final id = card.sessionId;
+  if (id == null) return null;
+  final server = card.server?.toLowerCase();
+  final hits = [
+    for (final s in sessions)
+      if (s.id == id && (server == null || s.server.name.toLowerCase() == server)) s,
+  ];
+  return hits.length == 1 ? hits.single : null;
+}
+
 class McPickSender {
   McPickSender({required this.actions, required this.sessions, required this.currentAsk});
 
@@ -48,16 +62,7 @@ class McPickSender {
 
   /// The card's session, or null when it is not known or not one session. A cluster peer's
   /// name and this app's name for that server can differ in case.
-  Session? sessionOf(McCard card) {
-    final id = card.sessionId;
-    if (id == null) return null;
-    final server = card.server?.toLowerCase();
-    final hits = [
-      for (final s in sessions())
-        if (s.id == id && (server == null || s.server.name.toLowerCase() == server)) s,
-    ];
-    return hits.length == 1 ? hits.single : null;
-  }
+  Session? sessionOf(McCard card) => mcSessionOfCard(sessions(), card);
 
   /// The AskUserQuestion on [card]'s session's screen, from the route the session screen's
   /// overlay reads; null when nothing is pending. Throws [ApiException] when the session is not
