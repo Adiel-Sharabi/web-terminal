@@ -54,7 +54,7 @@ void main() {
           body: Builder(
             builder: (context) => TextButton(
               onPressed: () => showSessionActionsSheet(context, s,
-                  onChanged: () {}, canClearWait: canClearWait, api: api()),
+                  onChanged: () {}, canClearWait: canClearWait, canMove: false, api: api()),
               child: const Text('open'),
             ),
           ),

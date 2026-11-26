@@ -380,6 +380,7 @@ class _DashboardScreenState extends State<DashboardScreen> with SupervisorListWa
       onChanged: SessionRepository.instance.refresh,
       onForked: _openSession,
       canClearWait: SessionRepository.instance.canClearWait(session),
+      canMove: SessionRepository.instance.canMoveSession(session),
     );
     return SessionCard(
       key: ValueKey('${favoriteRow ? 'fav' : 'main'}-${session.id}'),

@@ -726,6 +726,23 @@ the replaced id (400), and a session that is not on this server (404).
 A script that sends only `spawnedBy` (no `parentId`) is traced instead: when the request comes from
 this machine, the server follows the calling process up to the session it runs in and records that
 as the parent.
+
+**Moving sessions between parents** — the family can change after a session is created.
+`PATCH /api/sessions/:id/parent` `{"parentId": "<id>"}` moves a session under another one
+(`{"parentId": null}` makes it top-level). Send it to the server that owns the session; it works
+for any session, including one the server did not open (restored, or opened by hand). The new
+parent must be a live session on some reachable machine (404 otherwise), and never the session
+itself or anything under it (409: a loop). `POST /api/sessions/:id/children/move`
+`{"to": "<id>" | null, "children": [ids]?}` hands a session's children (all, or the ones named)
+to another session; any server takes it and forwards each child's move to the machine that owns
+the child. The answer lists `moved` and `failed` (200 when all moved, 207 when only some did).
+A server that can do this advertises the `session-parent` capability. An assigned parent survives
+a restart, beats the parent the session was opened with, and is kept by a hand-off successor.
+From a shell or an agent: `node scripts/wt-family.js parent <id|me> <id|me|none>`,
+`node scripts/wt-family.js move-children <from|me> <to|me|none> [--only <id>,...]` and
+`node scripts/wt-family.js show [<id|me>]` (`me` is `$WT_SESSION_ID`). In the companion, a
+session's menu has **Move under...** (a picker over every session on every machine, never the
+session itself or its own sub-sessions) and, when it has sub-sessions, **Hand sub-sessions to...**.
 In the session list, a session with sub-sessions in its own machine's group has a line under it (`N sub-sessions`, counting
 every level below it): tap it to fold them away and again to bring them back. Folded, the line keeps one
 status dot per hidden session, so a helper waiting on you still shows; the choice is remembered

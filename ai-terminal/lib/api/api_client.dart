@@ -23,6 +23,15 @@ import 'supervisor_models.dart';
 ///
 /// [status] is the HTTP status code, or `0` for transport-level failures
 /// (timeout, DNS, connection refused, malformed response).
+/// #558 - what a hand-over of a session's children did: how many moved, how many
+/// were refused or unreachable, and the first reason given.
+class ChildrenMoveResult {
+  const ChildrenMoveResult({required this.moved, required this.failed, this.firstError});
+  final int moved;
+  final int failed;
+  final String? firstError;
+}
+
 class ApiException implements Exception {
   /// HTTP status code, or `0` for a transport/timeout/parse failure.
   final int status;
@@ -956,6 +965,33 @@ class ApiClient {
   /// Renames a session (`PATCH /api/sessions/:id`).
   Future<void> renameSession(String sessionId, String name) async {
     await _send('PATCH', '/api/sessions/$sessionId', body: {'name': name});
+  }
+
+  /// #558 - moves [sessionId] under [parentId], or to the top level when it is
+  /// null (`PATCH /api/sessions/:id/parent`). Sent to the server that OWNS the
+  /// session. A loop, an unknown parent or the session itself is refused (409/404),
+  /// thrown as an [ApiException] carrying the server's reason.
+  Future<void> setSessionParent(String sessionId, String? parentId) async {
+    await _send('PATCH', '/api/sessions/$sessionId/parent', body: {'parentId': parentId});
+  }
+
+  /// #558 - hands every child of [fromId] to [toId] (null = top level)
+  /// (`POST /api/sessions/:id/children/move`). The children may live on any
+  /// server: this one forwards each move to the child's own. Some may move and
+  /// some not (207, or one refusal's status), so the answer is read, not thrown.
+  Future<ChildrenMoveResult> moveChildren(String fromId, String? toId) async {
+    final res = await _send('POST', '/api/sessions/$fromId/children/move',
+        body: {'to': toId}, alsoAccept: const {404, 409, 501, 502});
+    final j = jsonDecode(res.body);
+    if (j is! Map<String, dynamic> || j['moved'] is! List) {
+      throw ApiException(res.statusCode, j is Map && j['error'] is String ? j['error'] as String : 'HTTP ${res.statusCode}');
+    }
+    final failed = (j['failed'] as List? ?? const []).whereType<Map>().toList();
+    return ChildrenMoveResult(
+      moved: (j['moved'] as List).length,
+      failed: failed.length,
+      firstError: failed.isEmpty ? null : failed.first['error']?.toString(),
+    );
   }
 
   /// Persists a new session display order on the server

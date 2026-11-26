@@ -13,6 +13,7 @@ import '../api/api_client.dart';
 import '../api/models.dart';
 import '../services/session_repository.dart';
 import '../theme/app_theme.dart';
+import '../util/session_tree.dart';
 import 'app_bottom_sheet.dart';
 
 /// Opens the actions sheet for [session]. Calls [onChanged] after any action
@@ -24,12 +25,15 @@ import 'app_bottom_sheet.dart';
 /// "Not waiting" (#327) is offered when [canClearWait] is true. It is REQUIRED, not
 /// defaulted: every caller answers it with [SessionRepository.canClearWait] (the one
 /// rule), and a silent default is what would let that wiring break with every test green.
+/// [canMove] (#558) is required for the same reason, answered with
+/// [SessionRepository.canMoveSession]: "Move under..." and "Hand sub-sessions to...".
 Future<void> showSessionActionsSheet(
   BuildContext context,
   Session session, {
   required VoidCallback onChanged,
   ValueChanged<Session>? onForked,
   required bool canClearWait,
+  required bool canMove,
   ApiClient? api,
 }) {
   final client = api ?? ApiClient(session.server);
@@ -45,6 +49,7 @@ Future<void> showSessionActionsSheet(
       onChanged: onChanged,
       onForked: onForked,
       canClearWait: canClearWait,
+      canMove: canMove,
     ),
   );
 }
@@ -244,6 +249,205 @@ Future<void> clearSessionWait(
   () => (api ?? ApiClient(session.server)).patchBrief(session.id, clearWait: true),
 );
 
+/// #558 - THE "Move under..." flow: pick a new parent for [session] from every
+/// listed session on every server (never itself or anything under it: the server
+/// refuses a loop, so it is not offered), or "No parent". Shared by the actions
+/// sheet and the session screen's menu. Returns true once a move was sent.
+Future<bool> promptAndMoveSession(
+  BuildContext context,
+  Session session, {
+  required VoidCallback onChanged,
+  ApiClient? api,
+  List<Session>? sessions,
+}) async {
+  final all = sessions ?? SessionRepository.instance.current;
+  final tree = SessionTree(all);
+  final exclude = <String>{session.id, ...tree.descendantsOf(session).map((s) => s.id)};
+  final current = tree.parentOf(session);
+  final pick = await _pickParent(
+    context,
+    title: 'Move "${session.displayName}" under',
+    candidates: _uniqueById(all).where((s) => !exclude.contains(s.id)).toList(),
+    currentId: current?.id,
+    offerNone: session.parentId != null,
+  );
+  if (pick == null || !context.mounted) return false;
+  final client = api ?? ApiClient(session.server);
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await client.setSessionParent(session.id, pick.session?.id);
+    onChanged();
+    messenger.showSnackBar(SnackBar(
+      content: Text(pick.session == null
+          ? '${session.displayName} is now a top-level session'
+          : '${session.displayName} moved under ${pick.session!.displayName}'),
+    ));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('Move failed: ${e is ApiException ? e.message : e}')));
+  }
+  return true;
+}
+
+/// #558 - THE "Hand sub-sessions to..." flow: every child of [session] (on any
+/// server) moves under the session picked, or to the top level. The server that
+/// owns [session] forwards each child's move to the child's own server.
+Future<bool> promptAndHandOverChildren(
+  BuildContext context,
+  Session session, {
+  required VoidCallback onChanged,
+  ApiClient? api,
+  List<Session>? sessions,
+}) async {
+  final all = sessions ?? SessionRepository.instance.current;
+  final tree = SessionTree(all);
+  final kids = tree.childrenOf(session);
+  final exclude = <String>{session.id, ...tree.descendantsOf(session).map((s) => s.id)};
+  final pick = await _pickParent(
+    context,
+    title: 'Hand ${kids.length} sub-session${kids.length == 1 ? '' : 's'} of "${session.displayName}" to',
+    candidates: _uniqueById(all).where((s) => !exclude.contains(s.id)).toList(),
+    currentId: null,
+    offerNone: true,
+  );
+  if (pick == null || !context.mounted) return false;
+  final client = api ?? ApiClient(session.server);
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    final r = await client.moveChildren(session.id, pick.session?.id);
+    onChanged();
+    final where = pick.session == null ? 'the top level' : pick.session!.displayName;
+    messenger.showSnackBar(SnackBar(
+      content: Text(r.failed == 0
+          ? 'Moved ${r.moved} to $where'
+          : 'Moved ${r.moved} to $where; ${r.failed} not moved: ${r.firstError ?? 'refused'}'),
+    ));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('Hand-over failed: ${e is ApiException ? e.message : e}')));
+  }
+  return true;
+}
+
+/// One row per session id: two server entries reaching the same box (a LAN and a
+/// tailnet URL) list the same session twice.
+List<Session> _uniqueById(List<Session> all) {
+  final seen = <String>{};
+  return [for (final s in all) if (seen.add(s.id)) s];
+}
+
+/// What the parent picker answered: a session, or [session] null for "No parent".
+class _ParentPick {
+  const _ParentPick(this.session);
+  final Session? session;
+}
+
+/// The parent picker: a filter field over [candidates] (name, folder, server),
+/// "No parent" first when [offerNone]. Null when cancelled.
+Future<_ParentPick?> _pickParent(
+  BuildContext context, {
+  required String title,
+  required List<Session> candidates,
+  required String? currentId,
+  required bool offerNone,
+}) {
+  return showDialog<_ParentPick>(
+    context: context,
+    builder: (context) => _ParentPickerDialog(
+      title: title,
+      candidates: candidates,
+      currentId: currentId,
+      offerNone: offerNone,
+    ),
+  );
+}
+
+class _ParentPickerDialog extends StatefulWidget {
+  const _ParentPickerDialog({
+    required this.title,
+    required this.candidates,
+    required this.currentId,
+    required this.offerNone,
+  });
+
+  final String title;
+  final List<Session> candidates;
+  final String? currentId;
+  final bool offerNone;
+
+  @override
+  State<_ParentPickerDialog> createState() => _ParentPickerDialogState();
+}
+
+class _ParentPickerDialogState extends State<_ParentPickerDialog> {
+  String _filter = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _filter.trim().toLowerCase();
+    final shown = q.isEmpty
+        ? widget.candidates
+        : widget.candidates
+            .where((s) =>
+                s.displayName.toLowerCase().contains(q) ||
+                s.cwd.toLowerCase().contains(q) ||
+                s.server.name.toLowerCase().contains(q))
+            .toList();
+    return AlertDialog(
+      title: Text(widget.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+      contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+      content: SizedBox(
+        width: 420,
+        height: 420,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: TextField(
+                key: const ValueKey('parent-picker-filter'),
+                autofocus: true,
+                decoration: const InputDecoration(
+                  prefixIcon: Icon(Icons.search),
+                  hintText: 'Filter by name, folder or machine',
+                ),
+                onChanged: (v) => setState(() => _filter = v),
+              ),
+            ),
+            Expanded(
+              child: ListView(
+                children: [
+                  if (widget.offerNone)
+                    ListTile(
+                      key: const ValueKey('parent-picker-none'),
+                      leading: const Icon(Icons.vertical_align_top),
+                      title: const Text('No parent (top level)'),
+                      onTap: () => Navigator.pop(context, const _ParentPick(null)),
+                    ),
+                  for (final s in shown)
+                    ListTile(
+                      key: ValueKey('parent-picker-${s.id}'),
+                      leading: Icon(s.id == widget.currentId ? Icons.check : Icons.subdirectory_arrow_right),
+                      title: Text(s.displayName, maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text('${s.server.name} - ${s.cwd}', maxLines: 1, overflow: TextOverflow.ellipsis),
+                      enabled: s.id != widget.currentId,
+                      onTap: () => Navigator.pop(context, _ParentPick(s)),
+                    ),
+                  if (shown.isEmpty && !widget.offerNone)
+                    const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Text('No other session to move it under.'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
+      ],
+    );
+  }
+}
+
 /// Wraps a bottom-sheet body so it never overflows a short viewport: caps the
 /// height at 85% of the screen and scrolls its content past that, keeping the
 /// bottom rows (e.g. the Notify Level radios) reachable (issue #13). Used with
@@ -285,6 +489,7 @@ class _SessionActionsSheet extends StatelessWidget {
     required this.onChanged,
     this.onForked,
     this.canClearWait = false,
+    this.canMove = false,
   });
 
   final Session session;
@@ -292,6 +497,17 @@ class _SessionActionsSheet extends StatelessWidget {
   final VoidCallback onChanged;
   final ValueChanged<Session>? onForked;
   final bool canClearWait;
+  final bool canMove;
+
+  Future<void> _move(BuildContext context) async {
+    final moved = await promptAndMoveSession(context, session, onChanged: onChanged, api: api);
+    if (moved && context.mounted) Navigator.pop(context);
+  }
+
+  Future<void> _handOver(BuildContext context) async {
+    final moved = await promptAndHandOverChildren(context, session, onChanged: onChanged, api: api);
+    if (moved && context.mounted) Navigator.pop(context);
+  }
 
   Future<void> _run(
     BuildContext context,
@@ -388,6 +604,21 @@ class _SessionActionsSheet extends StatelessWidget {
               leading: const Icon(Icons.call_split),
               title: const Text('Fork session'),
               onTap: () => _fork(context),
+            ),
+          // #558 - change who this session is drawn under, or hand its children on.
+          if (canMove)
+            ListTile(
+              key: const ValueKey('session-action-move'),
+              leading: const Icon(Icons.account_tree_outlined),
+              title: const Text('Move under...'),
+              onTap: () => _move(context),
+            ),
+          if (canMove && SessionTree(SessionRepository.instance.current).childrenOf(session).isNotEmpty)
+            ListTile(
+              key: const ValueKey('session-action-hand-over'),
+              leading: const Icon(Icons.move_down),
+              title: const Text('Hand sub-sessions to...'),
+              onTap: () => _handOver(context),
             ),
           ListTile(
             leading: Icon(
