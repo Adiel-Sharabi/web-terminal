@@ -618,7 +618,9 @@ void main() {
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
       expect(find.byType(McProjectScreen), findsNothing);
-      expect(find.byKey(const ValueKey('mc-projects-tab')), findsOneWidget);
+      // No Lines tab (2026-11-26): the last Back lands on Now, not on a list no tab shows.
+      expect(find.byKey(const ValueKey('mc-projects-tab')), findsNothing);
+      expect(find.byType(McNowView), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
     });
 

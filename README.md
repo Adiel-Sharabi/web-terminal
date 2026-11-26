@@ -885,7 +885,7 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   inherit the binding. Config `mc.startCommand` sets the launch command.
 - **Lines of work (#523):** a project runs several lines of work side by side (a bug hunt, health
   checks, a feature, a release cut), and Mission Control shows each line apart, at the top of Now
-  and in the Lines tab, with its stage bar, what needs you, its sessions and machines; the project is
+  (tap one for its page; the Lines tab was dropped in 2026-11, #561), with its stage bar, what needs you, its sessions and machines; the project is
   a label on the line. A work item's line, first match wins: your **Move to line...** (stored on the
   authority), the line its session reported (optional report field `line`) or was started for
   (Start work asks), or that of the orchestrator that started it; then the project's rules in

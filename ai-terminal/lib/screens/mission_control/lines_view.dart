@@ -94,7 +94,7 @@ class McLineCard extends StatelessWidget {
   }
 }
 
-/// The Lines tab's list page: the lines, with a filter chip per project they belong to.
+/// The list of lines (Now's, and the projects navigator's root): the lines, with a filter chip per project they belong to.
 class McLinesList extends StatefulWidget {
   const McLinesList({super.key, required this.lines, required this.onOpen});
   final List<McLine> lines;

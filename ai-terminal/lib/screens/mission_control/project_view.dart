@@ -37,7 +37,12 @@ class McProjectsNavigator extends StatefulWidget {
     this.actions = const [],
     this.active = true,
     this.now,
+    this.onExit,
   });
+
+  /// Leaves the navigator for the page that opened it (Now): called when a pop lands back on the
+  /// list, and by the list's own back arrow. Null: the list is a place of its own (no back arrow).
+  final VoidCallback? onExit;
 
   final McFeed feed;
   final void Function(McCard card) onAnswer;
@@ -61,6 +66,13 @@ class McProjectsNavigator extends StatefulWidget {
 
 class McProjectsNavigatorState extends State<McProjectsNavigator> {
   final GlobalKey<NavigatorState> _nav = GlobalKey<NavigatorState>();
+
+  /// A pop that lands on the list goes on to [McProjectsNavigator.onExit]: opened from Now,
+  /// Back from a line's page returns to Now, not to a list no tab shows any more.
+  late final NavigatorObserver _exitObserver = _PopToRootObserver(() {
+    final exit = widget.onExit;
+    if (exit != null) WidgetsBinding.instance.addPostFrameCallback((_) => exit());
+  });
 
   /// Shows [projectId]'s page, over the list.
   void openProject(String projectId) {
@@ -122,10 +134,17 @@ class McProjectsNavigatorState extends State<McProjectsNavigator> {
       onPopWithResult: (_) => _nav.currentState?.maybePop(),
       child: Navigator(
         key: _nav,
+        observers: [_exitObserver],
         onGenerateRoute: (settings) => MaterialPageRoute<void>(
           settings: settings,
           builder: (context) => Scaffold(
-            appBar: AppBar(automaticallyImplyLeading: false, title: Text(widget.feed.now?.lines != null ? 'Lines' : 'Projects'), actions: widget.actions),
+            appBar: AppBar(
+                automaticallyImplyLeading: false,
+                leading: widget.onExit == null
+                    ? null
+                    : BackButton(key: const ValueKey('mc-projects-exit'), onPressed: widget.onExit),
+                title: Text(widget.feed.now?.lines != null ? 'Lines' : 'Projects'),
+                actions: widget.actions),
             body: ListenableBuilder(
               listenable: widget.feed,
               builder: (context, _) => RefreshIndicator(
@@ -489,3 +508,14 @@ class _AreaTab extends StatelessWidget {
   }
 }
 
+
+/// Calls [onRoot] when a pop leaves only the navigator's first route (the list) showing.
+class _PopToRootObserver extends NavigatorObserver {
+  _PopToRootObserver(this.onRoot);
+  final VoidCallback onRoot;
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (previousRoute != null && previousRoute.isFirst) onRoot();
+  }
+}
