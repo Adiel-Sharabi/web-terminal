@@ -811,7 +811,9 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   authority (another server answers `409` naming it).
 - **Progress stage (#505):** a report item may say how far the work got (`triage` ... `merged`,
   `tested`). Evidence from the tracker wins over a stale report: a merged pull request or a closed
-  work item shows at least Merged, and a stage never moves backwards (its history is kept).
+  work item shows at least Merged, and a stage never moves backwards (its history is kept). An
+  Azure DevOps item's own state counts too (#561): Committed or Parked shows PR open, Merged or Ready
+  for test shows Merged, Done shows Tested; a Removed item is not taken as fixed just because it is closed.
 - **Subjects (#504):** `GET /api/mc/subjects` joins every server's sessions on the work item they
   report into one subject each (live sessions and the week's closed ones), with its details, stage,
   what it waits on and the runs (an orchestrator and its helper sessions) that group several;

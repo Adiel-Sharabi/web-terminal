@@ -102,6 +102,37 @@ test.describe('#505 evidence beats the report', () => {
     expect(S.evidenceStage(pr({ state: 'open' }))).toMatchObject({ stage: 'pr-open', source: 'pr' });
   });
 
+  test("#561 the work item's own state proves its stage (AM8's workflow)", () => {
+    // Open states that say how far the code got.
+    expect(S.evidenceStage(meta({ state: 'Committed' }))).toEqual({ stage: 'pr-open', source: 'tracker', detail: 'work item is Committed (pushed, not on mainline)' });
+    expect(S.evidenceStage(meta({ state: 'Parked' }))).toMatchObject({ stage: 'pr-open', source: 'tracker' });
+    expect(S.evidenceStage(meta({ state: 'Merged' }))).toEqual({ stage: 'merged', source: 'tracker', detail: 'work item is Merged (on mainline)' });
+    expect(S.evidenceStage(meta({ state: 'ready for test' }))).toMatchObject({ stage: 'merged', detail: 'work item is ready for test (released, on the QA desk)' });
+    // Done is verified: further than a merged PR.
+    expect(S.evidenceStage(meta({ state: 'Done', closed: true, prs: [{ number: 8, state: 'merged' }] }))).toEqual({ stage: 'tested', source: 'tracker', detail: 'work item is Done (verified)' });
+    // States that prove nothing: not started, worked on, waiting, not reproducible, reopened.
+    for (const state of ['New', 'Approved', 'In Progress', 'More info required', 'Not Reproducible', 'Reopen', 'Postponed', 'open']) {
+      expect(S.evidenceStage(meta({ state }))).toBe(null);
+    }
+    // The furthest wins; on a tie the pull request names it.
+    expect(S.evidenceStage(meta({ state: 'Committed', prs: [{ number: 7, state: 'open', reviews: 1 }] }))).toMatchObject({ stage: 'in-review', source: 'pr' });
+    expect(S.evidenceStage(meta({ state: 'Committed', prs: [{ number: 7, state: 'open' }] }))).toEqual({ stage: 'pr-open', source: 'pr', detail: 'PR #7 open' });
+    expect(S.evidenceStage(meta({ state: 'Ready for test', prs: [{ number: 7, state: 'open' }] }))).toMatchObject({ stage: 'merged', source: 'tracker' });
+    // A closed item that was given up proves nothing by being closed - unless a PR really merged.
+    expect(S.evidenceStage(meta({ state: 'Removed', closed: true }))).toBe(null);
+    expect(S.evidenceStage(meta({ state: 'Removed', closed: true, prs: [{ number: 8, state: 'merged' }] }))).toMatchObject({ stage: 'merged', source: 'pr' });
+    // A state name that is an inherited object key is not a state.
+    expect(S.evidenceStage(meta({ state: 'constructor' }))).toBe(null);
+  });
+
+  test('#561 a state-proved stage is withdrawn when the item moves back (Ready for test -> Reopen)', () => {
+    const first = S.foldStage({ history: [], reports: [], meta: meta({ state: 'Ready for test' }), now: T0 });
+    expect(first.stage.current).toBe('merged');
+    const back = S.foldStage({ history: first.history, reports: [], meta: meta({ state: 'Reopen' }), now: T0 + 1000 });
+    expect(back.stage.current).toBe(null);
+    expect(back.changed).toBe(true);
+  });
+
   test('a merged PR shows merged even though the agent last said fixing', () => {
     const f = S.foldStage({ history: [], reports: [{ stage: 'fixing', at: T0 }], meta: meta({ prs: [{ number: 43, state: 'merged' }] }), now: T0 + 5 });
     expect(f.stage).toMatchObject({ current: 'merged', reported: 'fixing', evidence: 'merged' });

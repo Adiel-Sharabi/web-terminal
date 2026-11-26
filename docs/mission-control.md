@@ -143,6 +143,11 @@ item (`Meta.closed`) -> merged; else a linked PR still open -> pr-open (in-revie
 carries no review count yet, so today in-review comes only from a report), even beside an earlier
 merged one (phase A merged, phase B open); else a merged linked PR -> merged; an abandoned PR
 proves nothing. A GitHub link is any cross-reference, so a PR that only mentions the item counts.
+The work item's own state proves a stage too (#561, `TRACKER_STATE_STAGES`, AM8's workflow from
+am8_core `.claude/wi-flow/flow.json`): Committed / Parked -> pr-open, Merged / Ready for test -> merged,
+Done -> tested; every other state (New, Approved, In Progress, Reopen, More info required, Not
+Reproducible, Postponed) proves nothing. The furthest of the state and the PR evidence wins (a tie
+names the PR). A closed item that was given up (Removed) proves nothing by being closed.
 current = the furthest of the stored history, the reports and the evidence. A stage reached by a
 REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
 withdrawn when a fresh, complete read (no `error`, no `warning`) no longer proves it (a reopened item, another PR opened),
