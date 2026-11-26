@@ -576,6 +576,12 @@ test.describe('a card stands alone (#570)', () => {
     ['context', { context: 'See plan C:\\dev\\web-terminal\\docs and option C:/dev/x' }],
     ['context', { context: 'Approach and alternative both fit; a variant of the plan.' }],
     ['context', { context: 'Staged from the pilot group, then everyone. Built from main.' }],
+    // A letter after a hyphen is a part, a connector or a flag, never an option (review of #572).
+    ['context', { context: 'The S25 charges on USB-C only; pass -C only to git, and grep -R only on lib.' }],
+    ['context', { context: 'HDMI-A only, and a USB-C only cable.' }],
+    // The keyword and its letter must share a line: context keeps its paragraphs.
+    ['context', { context: 'We follow the release plan\nA rollback takes an hour' }],
+    ['context', { context: 'It was staged from\nA pilot group, then widened' }],
     ['question', { question: 'Ready for test, or merge now?' }],
     ['question', { question: 'Do we ship the PR behind CI?' }],
     ['options[0].label', { options: [opt('Plan as drawn'), opt('Ready for test')] }],
@@ -606,8 +612,12 @@ test.describe('a card stands alone (#570)', () => {
     expect(r.error).toContain('option C');
   });
 
-  test('an ask with no ref is judged the same: the rule rides with the decision, not the ref', () => {
-    expect(asked(ask({ ref: undefined, context: 'Plan B only' })).error).toContain('defined only in your chat');
+  test('the refusal quotes a short, one-line hit, never a long run of spaces or a line break', () => {
+    const r = asked(ask({ context: `option${' '.repeat(5000)}C wins` }));
+    expect(r.error).toContain('defined only in your chat');
+    expect(r.error.length).toBeLessThan(900);
+    const q = asked(ask({ context: 'take option \u00a0 C' }));
+    expect(q.error).toContain('"option C"');
   });
 
   test('the note teaches it in one sentence', () => {
