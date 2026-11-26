@@ -243,13 +243,13 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     }
   }
 
-  /// A project tapped on Now: the Projects tab, on that project's page.
+  /// A project tapped on Now: that project's page, over Now.
   void _openProject(McProject p) {
     setState(() => _tab = McTab.projects);
     WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openProject(p.id));
   }
 
-  /// A line tapped on Now: the Lines tab, on that line's page (#523).
+  /// A line tapped on Now: that line's page, over Now (#523).
   void _openLine(McLine l) {
     setState(() => _tab = McTab.projects);
     WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openLine(l.id));
@@ -272,7 +272,10 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             onStartWork: (projectId) => _startWork(projectId: projectId),
             actions: _actions(),
             active: _isActive,
-            onExit: () => setState(() => _tab = McTab.now),
+            // Late by a frame: only while that page is still what shows (a rail tap may have moved on).
+            onExit: () {
+              if (mounted && _tab == McTab.projects) setState(() => _tab = McTab.now);
+            },
           ),
         McTab.sessions => (widget.sessionsBoardBuilder ??
             (open) => WorkBoardScreen(

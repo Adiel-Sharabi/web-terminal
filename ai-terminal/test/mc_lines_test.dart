@@ -4,7 +4,7 @@
 //     `line`, `GET /api/mc/lines`, junk tolerated;
 //   * Now shows one card per line (project as a label, counts, stage bar) and falls back
 //     to the projects when `lines` is absent;
-//   * the Lines tab opens a line's subjects (`GET /api/mc/subjects?line=<id>`);
+//   * a line tapped on Now opens its subjects (`GET /api/mc/subjects?line=<id>`);
 //   * the subject screen names its line and "Move to line..." sends the right body for a
 //     pick, a new name and back to automatic, and shows a refusal's text;
 //   * Start work sends `line` or `lineName`, never both, and no picker without lines.
@@ -379,7 +379,7 @@ void main() {
     });
   });
 
-  group('Lines tab', () {
+  group('Line pages (no Lines tab)', () {
     testWidgets('a line tapped on Now opens its subjects (read by ?line=), a row opens the subject', (tester) async {
       await _size(tester, const Size(1400, 2400));
       final auth = _Authority();
