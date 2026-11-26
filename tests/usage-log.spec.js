@@ -211,10 +211,13 @@ test.describe('#425 server logs', () => {
       const cookie = (login.headers.get('set-cookie') || '').split(';')[0];
       const ws = new WebSocket(`${BASE.replace('http', 'ws')}/ws/${id}`, { headers: { Cookie: cookie, 'x-forwarded-for': '203.0.113.9' } });
       await new Promise((resolve, reject) => { ws.on('open', resolve); ws.on('error', reject); });
+      const mine = () => linesOf(file).filter((l) => l.id === id);
+      // The server handles a mode frame the moment it arrives, but writes the attach line only
+      // when the worker attach completes; on a slow runner a frame sent at once is logged FIRST.
+      await until(() => mine().some((l) => l.event === 'attach'), 'the attach line');
       ws.send(JSON.stringify({ mode: 'background', browserId: 'v425' })); // no change: not a line
       ws.send(JSON.stringify({ mode: 'active', browserId: 'v425' }));
       ws.send('secret-425-keystrokes');
-      const mine = () => linesOf(file).filter((l) => l.id === id);
       await until(() => mine().some((l) => l.event === 'mode'), 'the mode line');
       ws.send(JSON.stringify({ mode: 'background', browserId: 'v425' }));
       await until(() => mine().filter((l) => l.event === 'mode').length === 2, 'the second mode line');
