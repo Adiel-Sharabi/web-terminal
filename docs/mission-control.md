@@ -681,33 +681,38 @@ its Now screen). Additive: no existing route or field changes except `checkIn` o
 Effort = { id /*the lead's session id*/, name, server, machines: [name], startedAt, lastActivity,
   state: 'needs-you'|'stuck'|'moving'|'waiting', doing /*newest live headline*/, verdict: Verdict|null,
   sessions: [{server, id, name, status, closed, closedAt, parentId, depth, wait: {on, what}|null, verdict|null}],
-  items: [{key, ref, title, stage, station, waitsOn}], needsYou: [Card], partial: bool, missing: [server] }
+  items: [{key, ref, title, stage, station, waitsOn}], needsYou: [Card], todoCount, partial: bool, missing: [server] }
 Verdict = { kind: 'legit'|'suspect'|'unknown', rule: 'R1'|'R2'|'R3'|'R6'|'R7'|'R9'|'check-in', text, at }
 IdleItem = { key, ref, title, stage, station, cls: 'waits-test'|'not-started'|'stranded'|'finished', updatedAt }
 ```
 
 **Who owns each field (read, never re-derived):** the tree is `lib/mc-tree.js` (`parentId` across servers, a
 hand-off through `replaces`); items, stage and station are the subjects' (`buildView`, `lib/mc-stage.js`);
-`needsYou` are the cards Answer now shows (`lib/mc-needs.js` `pendingCards`, the same ids); `machines[].slots` is
+`needsYou` are the cards Answer now SHOWS for the tree's sessions: `GET /api/mc/now` and this route read ONE `mcBuildNow`
+(`lib/mc-needs.js` `buildNow`, then `mcCardFaces`), so the same ids, a question carries its face, and a card held on
+My to-do or put off by Later is in neither; `todoCount` counts the tree's actions (they are on My to-do, never repeated
+under the effort, but they make it `needs-you`); `machines[].slots` is
 each server's own `maxSessions` (`GET /api/machine`, cached 30 s, null when unread). The dispatcher is no effort.
 
 **A wait's validity is the supervisor's, never MC's.** `verdict` is READ from the supervisor's state
 (`supervisorStateNow`, the one function `GET /api/supervisor/state` also serves) and from the row's published
 check-in word (`lib/check-in.js` `outcome`): R1 `waitState` (`resolved`/`gone` -> suspect with its `fact`;
-`pending` -> legit with the wait's own words; `unknown` -> unknown), R2 `orphan`, every open case of R3/R6/R7/R9
+`pending` -> legit with the wait's own words; `unknown` -> unknown; read only while the session still holds the wait the
+supervisor judged: the same `wait.at` on its row, since the supervisor scans each minute and a session that resumed or
+re-reported is not judged by the answer about its old wait), R2 `orphan`, every open case of R3/R6/R7/R9
 (title from `CASE_TITLES`), and a check-in that came back `stuck`/`lost`/`interrupted`. The supervisor off, or this
 server not the lease authority: every verdict is `null`.
 
-**State and order** (from the whole tree): any card that is a real ask -> `needs-you` (a possible-ask or a
-maybe-answered card is listed but does not decide it); else any suspect verdict -> `stuck` (the effort's
+**State and order** (from the whole tree): any card that is a real ask, or an action on My to-do -> `needs-you` (a
+possible-ask or a maybe-answered card is listed but does not decide it); else any suspect verdict -> `stuck` (the effort's
 `verdict` = the oldest suspect); else any live session `working` -> `moving`; else `waiting`. Order: needs-you
-(oldest ask first), stuck (oldest verdict first), moving (newest activity first), waiting (oldest wait first);
+(oldest ask first, over the cards that decide it), stuck (oldest verdict first), moving (newest activity first), waiting (oldest wait first);
 ties by the lead's id. Two leads on one line are two efforts.
 
 **Fail CLOSED (#562).** A server that did not answer (`servers[].ok` false) makes `complete` false. A lead that
 names a parent nobody lists, while incomplete, is `partial: true, missing: [server]` ("its lead may be on X"):
-never called orphaned or gone. A verdict that rests on a session's ABSENCE (R1 `gone`, R2 `orphan`) is `unknown`
-while incomplete, whatever the state says.
+never called orphaned or gone. A verdict that rests on a session's ABSENCE (R1 `gone`, R2 `orphan`, an open R2 case)
+is `unknown` while incomplete (the supervisor's scan or this view), whatever the state says.
 
 **Not running** = every subject no effort carries, grouped by its line, a group's items sorted by `cls`
 (`idleClassOf`, the one rule): `waits-test` (station Ready for test/Committed/Merged, or stage pr-open..merged;
@@ -720,8 +725,11 @@ are ordered by their best class. Tests: `tests/mc-efforts.spec.js` (pure), `test
 
 `ai-terminal/lib/screens/mission_control/running_view.dart` renders this answer; `McFeed` reads it beside
 `GET /api/mc/now` from the server that answered Now. A 404 (an authority older than the route), or a 200 with no
-`efforts` list, keeps the Now screen unchanged (a 404 is not asked again for 5 minutes); any other failed read keeps
+`efforts` list, keeps the Now screen unchanged (a 404 is not asked again for 5 minutes from the ask that got it, so a
+server upgraded since is picked up; a skipped poll never slides that window); any other failed read keeps
 the last efforts on screen with a note saying why they are old. The app re-derives nothing: it shows the served
 order, `state`, `verdict` and `cls`. The one thing it computes is a set difference of two served lists: a card
 `/api/mc/now` lists that no effort carries in `needsYou` (the dispatcher's own, a card whose tree has closed) is
-shown above the efforts as "Also waiting on you", so a wait on the person never disappears from the home.
+shown above the efforts as "Also waiting on you", so a wait on the person never disappears from the home. Known
+limit: unlike Answer now (#550), the home does not hold its order still while a person reaches for a card; the efforts
+re-sort at each 10 s poll.

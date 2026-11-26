@@ -95,6 +95,7 @@ class McFeed extends ChangeNotifier {
     required this.client,
     this.pollInterval = const Duration(seconds: 10),
     this.isForeground,
+    this.effortsRetry = kEffortsRetry,
   });
 
   /// The configured servers, read at every ask.
@@ -103,6 +104,9 @@ class McFeed extends ChangeNotifier {
 
   /// How often [now] is re-read while [active].
   final Duration pollInterval;
+
+  /// #561 - how long a server that answered 404 to the efforts is left alone ([kEffortsRetry]).
+  final Duration effortsRetry;
 
   /// Whether the app is in the foreground; a background app does not poll. Null: always.
   final bool Function()? isForeground;
@@ -333,7 +337,11 @@ class McFeed extends ChangeNotifier {
     } on McPeerException {
       return (null, false, 'it is not the Mission Control server');
     } on ApiException catch (e) {
-      return e.status == 404 ? (null, true, null) : (null, false, e.message);
+      if (e.status != 404) return (null, false, e.message);
+      // The window starts where the ask was MADE: a poll that is skipped inside it must not slide
+      // it on (every 10 s poll would, and an upgraded server would never be asked again).
+      _noEfforts[sv.baseUrl] = DateTime.now().add(effortsRetry);
+      return (null, true, null);
     } catch (e) {
       return (null, false, 'unreadable answer');
     }
@@ -348,7 +356,6 @@ class McFeed extends ChangeNotifier {
       _efforts = efforts;
       _effortsMessage = null;
     } else if (unsupported) {
-      _noEfforts[sv.baseUrl] = DateTime.now().add(kEffortsRetry);
       _efforts = null;
       _effortsMessage = null;
     } else {

@@ -34,14 +34,23 @@ const meta = (key, over = {}) => ({ key, ref: key, title: `Title of ${key}`, url
 const WAIT = (on, what, at = NOW - 20 * MIN) => ({ on, what, at });
 const ext = (what) => ({ reason: { kind: 'external', text: what, since: NOW - 20 * MIN, source: 'reported' }, wait: WAIT('external', what) });
 const sup = (over = {}) => ({ enabled: true, complete: true, sessions: [], cases: [], ...over });
+/** A supervisor row as stateOf serves it: the node's wait AT ITS LAST SCAN, and what it judged about it. */
+const ws = (r, state, fact) => ({ id: r.id, wait: r.brief.wait, waitState: { state, fact } });
 
 /** The efforts view of [rows] and [closed]. */
-function efforts({ rows = [], closed = [], metaByKey = {}, supervisor = null, servers = [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], slots = {} } = {}) {
+function efforts({ rows = [], closed = [], metaByKey = {}, supervisor = null, servers = [{ name: 'alpha', ok: true }, { name: 'beta', ok: true }], slots = {},
+  todos = [], later = {}, actionsDone = {} } = {}) {
   const nodes = M.sessionNodes({ rows, closed, now: NOW });
   const v = M.buildView({ nodes, metaByKey, projects: [], now: NOW, platform: 'win32' });
-  const cards = needs.pendingCards({ nodes, view: v, now: NOW });
-  return E.buildEfforts({ nodes, subjects: v.subjects, cards, servers, supervisor, slots, now: NOW });
+  // The cards Now SHOWS (held and Later ones out, actions on My to-do): what the route feeds it (server.js mcBuildNow).
+  const n = needs.buildNow({ nodes, view: v, todos, later, actionsDone, now: NOW });
+  return E.buildEfforts({ nodes, subjects: v.subjects, cards: n.answerNow, actions: n.actions, servers, supervisor, slots, now: NOW });
 }
+/** The ids of every card the rows owe (before held / Later). */
+const cardIds = (rows) => {
+  const nodes = M.sessionNodes({ rows, closed: [], now: NOW });
+  return needs.pendingCards({ nodes, view: M.buildView({ nodes, projects: [], now: NOW, platform: 'win32' }), now: NOW }).map((c) => c.id);
+};
 const item = (n) => ({ ref: `acme/widgets#${n}` });
 
 test.describe('#561 efforts: one card per lead session tree', () => {
@@ -110,8 +119,8 @@ test.describe('#561 efforts: state and order', () => {
     const waitNew = row('beta', { name: 'wait new', ...ext('review') });
     const waitOld = row('beta', { name: 'wait old', reason: { kind: 'external', text: 'review', since: NOW - 300 * MIN, source: 'reported' }, wait: WAIT('external', 'review', NOW - 300 * MIN) });
     const supervisor = sup({ sessions: [
-      { id: stuckOld.id, waitState: { state: 'resolved', fact: 'PR 1 merged' } }, { id: stuckNew.id, waitState: { state: 'resolved', fact: 'PR 2 merged' } },
-      { id: waitOld.id, waitState: { state: 'pending' } }, { id: waitNew.id, waitState: { state: 'pending' } }] });
+      ws(stuckOld, 'resolved', 'PR 1 merged'), ws(stuckNew, 'resolved', 'PR 2 merged'),
+      ws(waitOld, 'pending'), ws(waitNew, 'pending')] });
     // Created so the id tie-break would give the WRONG order inside each state (newest first, except moving: newest last).
     // The older suspect verdict is the one with the older wait.
     stuckOld.brief.wait.at = NOW - 120 * MIN; stuckNew.brief.wait.at = NOW - 40 * MIN;
@@ -127,7 +136,7 @@ test.describe('#561 efforts: state and order', () => {
     expect(efforts({ rows: [lead, kid] }).efforts[0].state).toBe('needs-you');
     expect(efforts({ rows: [lead, kid] }).efforts[0].needsYou.map((c) => c.sessionId)).toEqual([kid.id]);
     const kid2 = row('beta', { name: 'kid2', parentId: lead.id, ...ext('CI') });
-    const out = efforts({ rows: [lead, kid2], supervisor: sup({ sessions: [{ id: kid2.id, waitState: { state: 'resolved', fact: 'CI went green' } }] }) });
+    const out = efforts({ rows: [lead, kid2], supervisor: sup({ sessions: [ws(kid2, 'resolved', 'CI went green')] }) });
     expect(out.efforts[0].state).toBe('stuck');
     expect(out.efforts[0].verdict).toMatchObject({ kind: 'suspect', rule: 'R1', text: 'CI went green' });
   });
@@ -150,7 +159,7 @@ test.describe('#561 efforts: the verdict is the supervisor\'s, read', () => {
 
   test('R1: resolved -> suspect (its fact), gone -> suspect, pending -> legit (the wait\'s own words), unknown -> unknown', () => {
     const r = waiter();
-    const at = (state, fact) => verdictOf(r, sup({ sessions: [{ id: r.id, waitState: { state, fact } }] }));
+    const at = (state, fact) => verdictOf(r, sup({ sessions: [ws(r, state, fact)] }));
     expect(at('resolved', 'PR 941 merged').verdict).toMatchObject({ kind: 'suspect', rule: 'R1', text: 'PR 941 merged' });
     expect(at('gone', 'PR 941 was not found').verdict).toMatchObject({ kind: 'suspect', rule: 'R1' });
     expect(at('pending', '').verdict).toMatchObject({ kind: 'legit', rule: 'R1', text: 'CI on PR 941' });
@@ -183,7 +192,7 @@ test.describe('#561 efforts: the verdict is the supervisor\'s, read', () => {
 
   test('the supervisor off (or absent) -> every verdict is null; the tree still shows', () => {
     const r = waiter();
-    const supervisor = { enabled: false, complete: true, sessions: [{ id: r.id, waitState: { state: 'resolved', fact: 'PR 941 merged' } }] };
+    const supervisor = { enabled: false, complete: true, sessions: [ws(r, 'resolved', 'PR 941 merged')] };
     expect(verdictOf(r, supervisor).verdict).toBeNull();
     expect(verdictOf(r, null).verdict).toBeNull();
     expect(verdictOf(r, null).sessions[0].verdict).toBeNull();
@@ -196,10 +205,9 @@ test.describe('#561 efforts: the verdict is the supervisor\'s, read', () => {
     const b = row('beta', { name: 'b', parentId: lead.id, ...ext('CI b') });
     a.brief.wait.at = NOW - 10 * MIN; b.brief.wait.at = NOW - 50 * MIN;
     const out = efforts({ rows: [lead, a, b], supervisor: sup({ sessions: [
-      { id: lead.id, waitState: { state: 'pending' } },
-      { id: a.id, waitState: { state: 'resolved', fact: 'a is done' } }, { id: b.id, waitState: { state: 'resolved', fact: 'b is done' } }] }) });
+      ws(lead, 'pending'), ws(a, 'resolved', 'a is done'), ws(b, 'resolved', 'b is done')] }) });
     expect(out.efforts[0].verdict.text).toBe('b is done');
-    const calm = efforts({ rows: [lead], supervisor: sup({ sessions: [{ id: lead.id, waitState: { state: 'pending' } }] }) });
+    const calm = efforts({ rows: [lead], supervisor: sup({ sessions: [ws(lead, 'pending')] }) });
     expect(calm.efforts[0].verdict).toMatchObject({ kind: 'legit', text: 'PR review' });
   });
 });
@@ -225,7 +233,7 @@ test.describe('#561 efforts: fail CLOSED when a server did not answer (#562)', (
 
   test('a verdict that rests on ABSENCE (R1 gone, R2 orphan) is unknown, not suspect, while the scan is incomplete', () => {
     const r = row('alpha', { name: 'w', ...ext('PR 9') });
-    const gone = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [{ id: r.id, waitState: { state: 'gone', fact: 'PR 9 was not found' } }] }) }).efforts[0];
+    const gone = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [ws(r, 'gone', 'PR 9 was not found')] }) }).efforts[0];
     expect(gone.verdict.kind).toBe('unknown');
     expect(gone.state).toBe('waiting');
     const orphan = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [{ id: r.id, orphan: { state: 'orphan' } }] }) }).efforts[0];
@@ -299,5 +307,84 @@ test.describe('#561 header: live sessions out of the slots each machine has', ()
     expect(out.machines).toEqual([
       { name: 'alpha', live: 2, working: 1, slots: 10, ok: true },
       { name: 'beta', live: 1, working: 1, slots: 4, ok: true }]);
+  });
+});
+
+test.describe('#561 efforts: the cards are the ones Now shows (review of #576)', () => {
+  const youRow = (name = 'asker', at = NOW - 10 * MIN) => row('alpha', { name, status: 'working', reason: { kind: 'you', text: 'ok to merge?', since: at, source: 'reported' }, wait: WAIT('you', 'ok to merge?', at) });
+  const actionRow = (name = 'doer') => row('alpha', { name, status: 'working', reason: { kind: 'you', text: 'plug in the board', since: NOW - 5 * MIN, source: 'reported' },
+    wait: { on: 'you', kind: 'action', what: 'plug in the board', steps: ['plug it in'], where: 'the bench', at: NOW - 5 * MIN } });
+
+  test('a card put off by Later is no card here: the effort is not needs-you and lists nothing', () => {
+    const r = youRow();
+    const [id] = cardIds([r]);
+    expect(efforts({ rows: [r] }).efforts[0].state).toBe('needs-you');
+    const out = efforts({ rows: [r], later: { [id]: { until: NOW + 60 * MIN } } }).efforts[0];
+    expect(out.needsYou).toEqual([]);
+    expect(out.state).toBe('moving'); // the session works on
+  });
+
+  test('a card held on My to-do is not also listed under its effort', () => {
+    const r = youRow();
+    const [id] = cardIds([r]);
+    const out = efforts({ rows: [r], todos: [{ cardId: id, state: 'open', createdAt: NOW - MIN }] }).efforts[0];
+    expect(out.needsYou).toEqual([]);
+    expect(out.state).toBe('moving');
+  });
+
+  test('an action is on My to-do only: not in needsYou, but it still makes the effort needs-you and is counted', () => {
+    const r = actionRow();
+    const out = efforts({ rows: [r] }).efforts[0];
+    expect(out.needsYou).toEqual([]);
+    expect(out.todoCount).toBe(1);
+    expect(out.state).toBe('needs-you');
+    // Later hides an action like any card: then the effort is not waiting on the person.
+    const [id] = cardIds([r]);
+    const later = efforts({ rows: [r], later: { [id]: { until: NOW + 60 * MIN } } }).efforts[0];
+    expect(later.todoCount).toBe(0);
+    expect(later.state).toBe('moving');
+  });
+
+  test("the order by ask age reads the owed cards only: a guess older than another effort's real ask does not sort first", () => {
+    const a = row('alpha', { name: 'a', status: 'working' });
+    const b = row('alpha', { name: 'b', status: 'working' });
+    const nodes = M.sessionNodes({ rows: [a, b], closed: [], now: NOW });
+    const v = M.buildView({ nodes, now: NOW, platform: 'win32' });
+    const card = (sessionId, kind, askedAt) => ({ id: `c|${sessionId}|${kind}`, sessionId, kind, askedAt });
+    const cards = [card(a.id, 'wait', NOW - 10 * MIN), card(a.id, 'possible-ask', NOW - 100 * MIN), card(b.id, 'wait', NOW - 50 * MIN)];
+    const out = E.buildEfforts({ nodes, subjects: v.subjects, cards, servers: [{ name: 'alpha', ok: true }], now: NOW });
+    expect(out.efforts.map((e) => e.name)).toEqual(['b', 'a']);
+  });
+});
+
+test.describe('#561 efforts: a verdict judges the wait it was about (review of #576)', () => {
+  const waiter = () => row('alpha', { name: 'waiter', ...ext('CI on PR 941') });
+
+  test('a session that has since resumed (no wait) is not judged by the answer about its old wait', () => {
+    const r = row('alpha', { name: 'woke', status: 'working' });
+    const stale = { id: r.id, wait: WAIT('external', 'CI on PR 941'), waitState: { state: 'resolved', fact: 'PR 941 merged' } };
+    const out = efforts({ rows: [r], supervisor: sup({ sessions: [stale] }) }).efforts[0];
+    expect(out.verdict).toBeNull();
+    expect(out.state).toBe('moving');
+  });
+
+  test('a wait re-reported since the scan (a different at) is not judged by the answer about the earlier one', () => {
+    const r = waiter();
+    const old = { id: r.id, wait: WAIT('external', 'CI on PR 941', NOW - 90 * MIN), waitState: { state: 'resolved', fact: 'PR 941 merged' } };
+    const out = efforts({ rows: [r], supervisor: sup({ sessions: [old] }) }).efforts[0];
+    expect(out.verdict).toBeNull();
+    expect(out.state).toBe('waiting');
+    // The same wait IS judged.
+    expect(efforts({ rows: [r], supervisor: sup({ sessions: [ws(r, 'resolved', 'PR 941 merged')] }) }).efforts[0].state).toBe('stuck');
+  });
+
+  test('an open R2 case rests on absence too: unknown while a server did not answer, suspect when all did', () => {
+    const r = waiter();
+    const cases = [{ rule: 'R2', sessionId: r.id, openedAt: NOW - 30 * MIN, resolvedAt: null }];
+    const down = [{ name: 'alpha', ok: true }, { name: 'beta', ok: false }];
+    expect(efforts({ rows: [r], servers: down, supervisor: sup({ cases }) }).efforts[0].verdict.kind).toBe('unknown');
+    expect(efforts({ rows: [r], supervisor: sup({ cases }) }).efforts[0].verdict).toMatchObject({ kind: 'suspect', rule: 'R2' });
+    // A case that does not rest on absence (a stuck session, R3) stays suspect.
+    expect(efforts({ rows: [r], servers: down, supervisor: sup({ cases: [{ ...cases[0], rule: 'R3' }] }) }).efforts[0].verdict.kind).toBe('suspect');
   });
 });

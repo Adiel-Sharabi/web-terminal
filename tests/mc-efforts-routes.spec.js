@@ -95,6 +95,16 @@ test.describe('#561 GET /api/mc/efforts', () => {
     expect(src).toMatch(/app\.get\('\/api\/supervisor\/state'[\s\S]{0,700}supervisorStateNow\(cfg\)/);
   });
 
+  test('wiring (source gate): the cards are the ones Now shows - ONE mcBuildNow, never a second pendingCards', () => {
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const route = src.slice(src.indexOf("app.get('/api/mc/efforts'"), src.indexOf("// --- API: #523 Mission Control: lines of work ---"));
+    expect(route).toContain('mcBuildNow(v)');
+    expect(route).not.toContain('pendingCards');
+    const now = src.slice(src.indexOf("app.get('/api/mc/now'"), src.indexOf("app.post('/api/mc/todo'"));
+    expect(now).toContain('mcBuildNow(v)');
+    expect(src.match(/mcNeeds\.buildNow\(/g)).toHaveLength(1);
+  });
+
   test('a server that is not the authority answers 409 naming it', async () => {
     const before = fs.existsSync(CFG_FILE) ? fs.readFileSync(CFG_FILE, 'utf8') : null;
     fs.writeFileSync(CFG_FILE, JSON.stringify({ ...(before ? JSON.parse(before) : {}), cluster: [{ name: 'zeta', url: 'http://127.0.0.1:1' }], leases: { authority: 'zeta' } }, null, 2));

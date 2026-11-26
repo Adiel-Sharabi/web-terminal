@@ -158,7 +158,8 @@ class _Server {
   Object? effortsBody;
   int effortsCalls = 0;
 
-  McFeed feed() => McFeed(
+  McFeed feed({Duration effortsRetry = kEffortsRetry}) => McFeed(
+        effortsRetry: effortsRetry,
         servers: () => const [_a],
         client: (sv) => ApiClient(sv, httpClient: MockClient((req) async {
           if (req.url.path == '/api/mc/efforts') {
@@ -351,7 +352,7 @@ void main() {
       await pump(tester);
       expect(find.descendant(of: find.byKey(const ValueKey('mc-machine-chip-Alpha')), matching: find.text('Alpha 4/10')), findsOneWidget);
       expect(find.descendant(of: find.byKey(const ValueKey('mc-machine-chip-Beta')), matching: find.text('Beta 2')), findsOneWidget);
-      expect(find.descendant(of: find.byKey(const ValueKey('mc-machine-chip-Gamma')), matching: find.text('Gamma 0 - no answer')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const ValueKey('mc-machine-chip-Gamma')), matching: find.text('Gamma - no answer')), findsOneWidget);
       expect(find.byKey(const ValueKey('mc-running-incomplete')), findsOneWidget);
       expect(find.textContaining('Gamma did not answer'), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
@@ -384,6 +385,17 @@ void main() {
       await pump(tester);
       expect(find.byKey(const ValueKey('mc-todo-title')), findsOneWidget);
       expect(_top(tester, 'mc-todo-title'), lessThan(_top(tester, 'mc-running-title')));
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an effort that owes the person an action says it is on My to-do (the card is not repeated under it)', (tester) async {
+      final body = _efforts();
+      (body['efforts'] as List)[2]['todoCount'] = 2; // e-move: two actions on My to-do
+      server.effortsBody = body;
+      await pump(tester);
+      expect(find.text('2 things for you are on My to-do.'), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-effort-todo-e-move')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-effort-todo-e-ask')), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
 
@@ -435,6 +447,30 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('mc-idle-start-#7')));
       await tester.tap(find.byKey(const ValueKey('mc-idle-start-#9')));
       expect(started, [('#7', 'web-terminal'), ('#9', null)]);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a session-local item (key@session) has no Start work: it names nothing the tracker knows', (tester) async {
+      server.effortsBody = {
+        'efforts': <Object>[],
+        'idle': [
+          {
+            'line': null,
+            'items': [
+              {'key': '#7', 'ref': '#7', 'title': 'A tracker item', 'cls': 'stranded'},
+              {'key': 'free text@s-9', 'ref': 'free text', 'title': 'A free-text ref', 'cls': 'stranded'},
+            ],
+          },
+        ],
+        'machines': <Object>[],
+        'complete': true,
+      };
+      await pump(tester);
+      await tester.tap(find.byKey(const ValueKey('mc-idle-toggle')));
+      await tester.pump();
+      expect(find.byKey(const ValueKey('mc-idle-item-free text@s-9')), findsOneWidget, reason: 'still listed');
+      expect(find.byKey(const ValueKey('mc-idle-start-#7')), findsOneWidget);
+      expect(find.byKey(const ValueKey('mc-idle-start-free text@s-9')), findsNothing);
       await tester.pumpWidget(const SizedBox());
     });
   });
@@ -502,6 +538,23 @@ void main() {
       await pump(tester, 'e-nobody');
       expect(find.byKey(const ValueKey('mc-effort-gone')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    });
+  });
+
+  group('the feed asks an older server again', () {
+    test('a 404 is left alone for a while, then asked again - however often it is polled meanwhile (an upgrade is picked up)', () async {
+      final server = _Server()..effortsStatus = 404;
+      final feed = server.feed(effortsRetry: const Duration(milliseconds: 400));
+      addTearDown(feed.dispose);
+      await feed.refresh();
+      expect(feed.efforts, isNull);
+      server.effortsStatus = 200; // the authority is upgraded
+      // Polls arrive well inside the window; a skipped poll must not slide it on (it once did, forever).
+      for (var i = 0; i < 30 && feed.efforts == null; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await feed.refresh();
+      }
+      expect(feed.efforts, isNotNull, reason: 'asked again after the window, not never');
     });
   });
 

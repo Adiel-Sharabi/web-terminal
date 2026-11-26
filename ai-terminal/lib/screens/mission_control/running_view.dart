@@ -174,7 +174,8 @@ class McMachineChips extends StatelessWidget {
               key: ValueKey('mc-machine-chip-${m.name}'),
               visualDensity: VisualDensity.compact,
               avatar: Icon(Icons.circle, size: 10, color: m.ok ? AppColors.primary : AppColors.onSurfaceDisabled),
-              label: Text(m.ok ? m.label : '${m.label} - no answer',
+              // A machine that did not answer has no count to show: it was never read.
+              label: Text(m.ok ? m.label : '${m.name} - no answer',
                   style: small?.copyWith(color: m.ok ? null : AppColors.onSurfaceDisabled)),
             ),
           ),
@@ -272,6 +273,11 @@ class McEffortCard extends StatelessWidget {
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.bodySmall?.copyWith(color: verdictColor, fontWeight: v.isSuspect ? FontWeight.w600 : null)),
+            ],
+            if (e.todoCount > 0) ...[
+              const SizedBox(height: 4),
+              Text(e.todoCount == 1 ? 'One thing for you is on My to-do.' : '${e.todoCount} things for you are on My to-do.',
+                  key: ValueKey('mc-effort-todo-${e.id}'), style: theme.textTheme.bodySmall?.copyWith(color: AppColors.caution)),
             ],
             if (e.partial) ...[
               const SizedBox(height: 4),
@@ -376,11 +382,14 @@ class _McNotRunningState extends State<McNotRunning> {
               ]),
             ]),
           ),
-          TextButton(
-            key: ValueKey('mc-idle-start-${i.key}'),
-            onPressed: () => widget.onStartWork(i, g.line?.project),
-            child: const Text('Start work'),
-          ),
+          // A session-local item (`<key>@<session id>`, lib/mc-subjects.js subjectKeyOf) names nothing
+          // the tracker knows: Start work has nothing to bind to.
+          if (!i.key.contains('@'))
+            TextButton(
+              key: ValueKey('mc-idle-start-${i.key}'),
+              onPressed: () => widget.onStartWork(i, g.line?.project),
+              child: const Text('Start work'),
+            ),
         ]),
       ),
     );

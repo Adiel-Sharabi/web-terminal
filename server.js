@@ -7421,19 +7421,25 @@ app.get('/api/mc/subjects/:key', async (req, res) => {
 // each server's own session limit (GET /api/machine), cached; an unread one is null.
 const MC_PEER_SLOTS_TTL_MS = 30 * 1000;
 const _mcPeerSlots = new Map(); // peer url -> {at, slots}
+const _mcPeerSlotReads = new Map(); // peer url -> the read in flight (a second poll shares it)
 
 /** A peer's session limit, cached; a failed read keeps the last value (null when none was read). */
 async function mcPeerSlots(url, token) {
   const hit = _mcPeerSlots.get(url);
   if (hit && Date.now() - hit.at < MC_PEER_SLOTS_TTL_MS) return hit.slots;
-  let slots = hit ? hit.slots : null;
-  try {
-    const r = await clusterFetch(`${url}/api/machine?part=sessions`, { headers: { Authorization: `Bearer ${token}` }, timeout: 3000 });
-    const j = r.ok ? JSON.parse(r.body) : null;
-    if (j && j.sessions && Number.isFinite(j.sessions.max)) slots = j.sessions.max;
-  } catch { /* unreachable or not JSON: the last value stands */ }
-  _mcPeerSlots.set(url, { at: Date.now(), slots });
-  return slots;
+  if (_mcPeerSlotReads.has(url)) return _mcPeerSlotReads.get(url);
+  const read = (async () => {
+    let slots = hit ? hit.slots : null;
+    try {
+      const r = await clusterFetch(`${url}/api/machine?part=sessions`, { headers: { Authorization: `Bearer ${token}` }, timeout: 3000 });
+      const j = r.ok ? JSON.parse(r.body) : null;
+      if (j && j.sessions && Number.isFinite(j.sessions.max)) slots = j.sessions.max;
+    } catch { /* unreachable or not JSON: the last value stands */ }
+    _mcPeerSlots.set(url, { at: Date.now(), slots });
+    return slots;
+  })().finally(() => _mcPeerSlotReads.delete(url));
+  _mcPeerSlotReads.set(url, read);
+  return read;
 }
 
 /** `{ <server name>: maxSessions }` for every server of the cluster view that could be read. */
@@ -7460,8 +7466,11 @@ app.get('/api/mc/efforts', async (req, res) => {
     // The supervisor's own state, only where it runs (the same gate as its routes); else no verdicts.
     const cfg = supervisorCfg();
     const supervisor = supervisorAuthority().mode === 'self' && cfg.enabled ? { enabled: true, ...supervisorStateNow(cfg) } : { enabled: false };
-    const cards = mcNeeds.pendingCards({ nodes: v.nodes, view: v, now: v.generatedAt });
-    res.json(mcEfforts.buildEfforts({ nodes: v.nodes, subjects: v.subjects, cards, servers: v.servers, supervisor,
+    // The cards Now SHOWS (held on My to-do and put off by Later are out, a question carries its face): the person
+    // is never offered a card here that Answer now would not offer.
+    const n = mcBuildNow(v);
+    const cards = await mcCardFaces(n.answerNow, { keep: n.pending });
+    res.json(mcEfforts.buildEfforts({ nodes: v.nodes, subjects: v.subjects, cards, actions: n.actions, servers: v.servers, supervisor,
       slots: await mcSlots(reqUser), now: v.generatedAt }));
   } catch (e) {
     console.error(`[mc] efforts: ${e.message}`);
@@ -7566,6 +7575,14 @@ const MC_FACE_WAIT_MS = 1500;
 const mcFaces = mcQuestions.createFaceCache();
 const mcFaceReads = new Map(); // card id -> the read in flight (a second poll shares it)
 
+/** THE Now cards of a view: what Answer now and My to-do show (held and Later cards out, an action's Done record
+ *  on it). GET /api/mc/now and GET /api/mc/efforts (#561) both read exactly this, never their own copy. */
+function mcBuildNow(v) {
+  const now = Date.now();
+  return mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now),
+    actionsDone: mcNeeds.pruneActionsDone(mcState.actionsDone(), now), now });
+}
+
 async function mcCardFaces(cards, { keep = null } = {}) {
   const now = Date.now();
   const list = cards.filter((c) => c && c.kind === 'question' && c.sessionId);
@@ -7598,9 +7615,7 @@ app.get('/api/mc/now', async (req, res) => {
   try {
     const v = await cachedMcView(clusterReqUser(req));
     if (v.error) return res.status(500).json({ error: v.error });
-    const now = Date.now();
-    const n = mcNeeds.buildNow({ nodes: v.nodes, view: v, todos: mcState.todos(), later: mcNeeds.pruneLater(mcState.later(), now),
-      actionsDone: mcNeeds.pruneActionsDone(mcState.actionsDone(), now), now });
+    const n = mcBuildNow(v);
     res.json({ answerNow: await mcCardFaces(n.answerNow, { keep: n.pending }), actions: n.actions, todo: n.todo, moving: n.moving, projects: v.projectsOut, lines: v.linesOut, generatedAt: v.generatedAt });
   } catch (e) {
     console.error(`[mc] now: ${e.message}`);
