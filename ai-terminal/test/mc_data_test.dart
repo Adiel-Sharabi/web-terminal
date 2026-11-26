@@ -272,6 +272,8 @@ void main() {
     McFeed feed(List<ServerConfig> servers) => McFeed(
           servers: () => servers,
           client: (sv) => ApiClient(sv, httpClient: MockClient((req) async {
+            // #561: the efforts are read beside Now (mc_efforts_test.dart); this group is Now's asks.
+            if (req.url.path == '/api/mc/efforts') return _json({'error': 'Not found'}, 404);
             asked.add('${sv.name} ${req.method} ${req.url.path}');
             final st = status[sv.baseUrl] ?? 404;
             if (st == 0) throw const SocketException('down');
@@ -362,6 +364,7 @@ void main() {
       final f = McFeed(
         servers: () => [_a],
         client: (sv) => ApiClient(sv, httpClient: MockClient((req) async {
+          if (req.url.path == '/api/mc/efforts') return _json({'error': 'Not found'}, 404); // #561: not Now's ask
           calls++;
           await Future<void>.delayed(const Duration(milliseconds: 20));
           return _json(nowFixture(), 200);

@@ -667,3 +667,61 @@ Control's Ask and "Tell it" never ask for it. A server older than 1.138.0 ignore
 then shows the condensed reply and labels it "the short form". The station and stage come from
 `GET /api/mc/subjects/:key` (read per item, 4 s each: an item whose page cannot be read still shows, without
 where it stands).
+
+## Efforts (#561) - `lib/mc-efforts.js`, `GET /api/mc/efforts`
+
+The home is what RUNS. One **effort** per lead session tree (a lead and every session it started, on any
+machine, the week's closed ones included), and below them the work nobody runs. Authority only (`mcRefusal`),
+behind auth; capability `mc-efforts` on `/api/version` (an older authority 404s it: the companion then keeps
+its Now screen). Additive: no existing route or field changes except `checkIn` on the tree nodes.
+
+```
+{ efforts: [Effort], idle: [{line: {id, name, project, kind}|null, items: [IdleItem]}],
+  machines: [{name, live, working, slots, ok}], servers: [{name, ok}], complete: bool, generatedAt }
+Effort = { id /*the lead's session id*/, name, server, machines: [name], startedAt, lastActivity,
+  state: 'needs-you'|'stuck'|'moving'|'waiting', doing /*newest live headline*/, verdict: Verdict|null,
+  sessions: [{server, id, name, status, closed, closedAt, parentId, depth, wait: {on, what}|null, verdict|null}],
+  items: [{key, ref, title, stage, station, waitsOn}], needsYou: [Card], partial: bool, missing: [server] }
+Verdict = { kind: 'legit'|'suspect'|'unknown', rule: 'R1'|'R2'|'R3'|'R6'|'R7'|'R9'|'check-in', text, at }
+IdleItem = { key, ref, title, stage, station, cls: 'waits-test'|'not-started'|'stranded'|'finished', updatedAt }
+```
+
+**Who owns each field (read, never re-derived):** the tree is `lib/mc-tree.js` (`parentId` across servers, a
+hand-off through `replaces`); items, stage and station are the subjects' (`buildView`, `lib/mc-stage.js`);
+`needsYou` are the cards Answer now shows (`lib/mc-needs.js` `pendingCards`, the same ids); `machines[].slots` is
+each server's own `maxSessions` (`GET /api/machine`, cached 30 s, null when unread). The dispatcher is no effort.
+
+**A wait's validity is the supervisor's, never MC's.** `verdict` is READ from the supervisor's state
+(`supervisorStateNow`, the one function `GET /api/supervisor/state` also serves) and from the row's published
+check-in word (`lib/check-in.js` `outcome`): R1 `waitState` (`resolved`/`gone` -> suspect with its `fact`;
+`pending` -> legit with the wait's own words; `unknown` -> unknown), R2 `orphan`, every open case of R3/R6/R7/R9
+(title from `CASE_TITLES`), and a check-in that came back `stuck`/`lost`/`interrupted`. The supervisor off, or this
+server not the lease authority: every verdict is `null`.
+
+**State and order** (from the whole tree): any card that is a real ask -> `needs-you` (a possible-ask or a
+maybe-answered card is listed but does not decide it); else any suspect verdict -> `stuck` (the effort's
+`verdict` = the oldest suspect); else any live session `working` -> `moving`; else `waiting`. Order: needs-you
+(oldest ask first), stuck (oldest verdict first), moving (newest activity first), waiting (oldest wait first);
+ties by the lead's id. Two leads on one line are two efforts.
+
+**Fail CLOSED (#562).** A server that did not answer (`servers[].ok` false) makes `complete` false. A lead that
+names a parent nobody lists, while incomplete, is `partial: true, missing: [server]` ("its lead may be on X"):
+never called orphaned or gone. A verdict that rests on a session's ABSENCE (R1 `gone`, R2 `orphan`) is `unknown`
+while incomplete, whatever the state says.
+
+**Not running** = every subject no effort carries, grouped by its line, a group's items sorted by `cls`
+(`idleClassOf`, the one rule): `waits-test` (station Ready for test/Committed/Merged, or stage pr-open..merged;
+the station outranks a session's own "done"), `not-started` (no stage, no session beyond a start binding),
+`stranded` (station In Progress, a stage triage..fixing, or a session reported: someone began, nobody is on it),
+`finished` (tracker closed, station Done, stage tested, or every session said done with no PR still open). Groups
+are ordered by their best class. Tests: `tests/mc-efforts.spec.js` (pure), `tests/mc-efforts-routes.spec.js`.
+
+### The companion's Running home (#561)
+
+`ai-terminal/lib/screens/mission_control/running_view.dart` renders this answer; `McFeed` reads it beside
+`GET /api/mc/now` from the server that answered Now. A 404 (an authority older than the route), or a 200 with no
+`efforts` list, keeps the Now screen unchanged (a 404 is not asked again for 5 minutes); any other failed read keeps
+the last efforts on screen with a note saying why they are old. The app re-derives nothing: it shows the served
+order, `state`, `verdict` and `cls`. The one thing it computes is a set difference of two served lists: a card
+`/api/mc/now` lists that no effort carries in `needsYou` (the dispatcher's own, a card whose tree has closed) is
+shown above the efforts as "Also waiting on you", so a wait on the person never disappears from the home.
