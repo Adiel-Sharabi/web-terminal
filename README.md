@@ -348,7 +348,11 @@ takes no action on any session yet.
   characters), an optional `context` (up to 1200, paragraphs kept), 2-4 `options` of `label`
   (up to 80) and optional `consequence` (up to 240), and an optional `recommended` option index.
   Only a `you` wait takes one, and it clears with that wait. The companion's inbox shows it as a
-  card; a pick is sent to the session as the reply `Decision: <label>`.
+  card; a pick is sent to the session as the reply `Decision: <label>`. A card is read alone,
+  often on a phone (#570), so a decision (and each standing `asks` entry) is refused, with the
+  reason, when its question, context, labels or consequences point at a lettered option defined
+  only in the agent's chat (`option C`, `B only`, `staged from B`, a label that is a letter); the
+  agent must say what each choice is.
 - `POST /api/sessions` takes an optional `goal` (one line, up to 300 characters). A hand-off
   successor inherits it.
 - `POST /api/sessions` also takes an optional `model` (#533), a model name such as `sonnet`, `opus` or `claude-sonnet-5-5`: the server puts `--model <name>` inside the command's claude call, right after the `claude` program word (so `claude "go"; exit` still runs on that model), unless that call already names one (its own choice wins), and answers the model of the command it stored as `model`. A name with brackets such as `opus[1m]` is stored quoted. It is a 400, with a reason and nothing created, when the name is malformed, when the command has no claude call (`model` is only for claude sessions) or cannot be read as a plain shell line, or when the flag would push the command past its 500 characters (never cut to fit). The same rule and the same name check (`lib/model-flag.js`) serve the supervisor dispatcher's model (#525). A routine task (fix with a repro, review round, watch/deploy/merge run) names `sonnet`; design, ambiguous or security work and the one final gate stay on the default.
