@@ -99,11 +99,16 @@ void main() {
     expect(find.textContaining('1 not moved: that server cannot move sessions yet'), findsOneWidget);
   });
 
-  testWidgets('the actions sheet offers Move under only when the owner can take it', (tester) async {
+  // One sheet per test: a second pump keeps the first sheet open over the button.
+  testWidgets('the actions sheet does not offer Move under when the owner cannot take it', (tester) async {
     await pump(tester, (c) => showSessionActionsSheet(c, kid, onChanged: () {}, canClearWait: false, canMove: false, api: api()));
-    expect(find.text('Move under...'), findsNothing);
     expect(find.text('Rename'), findsOneWidget);
+    expect(find.text('Move under...'), findsNothing);
+  });
+
+  testWidgets('the actions sheet offers Move under when the owner can take it', (tester) async {
     await pump(tester, (c) => showSessionActionsSheet(c, kid, onChanged: () {}, canClearWait: false, canMove: true, api: api()));
+    expect(find.text('Rename'), findsOneWidget);
     expect(find.text('Move under...'), findsOneWidget);
   });
 }
