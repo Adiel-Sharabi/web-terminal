@@ -159,8 +159,8 @@ recorded (a station that moves on lifts the cap with nothing lost), while `stage
 for, has `station: null` and keeps the generic stage. The companion shows the station wherever it shows a
 stage label for an ADO item (a subject's row, the progress track), and leaves out the `reported` and
 `evidence` halves there: not what a session said or a PR proves, but the station.
-current = the furthest of the stored history, the reports and the evidence. A stage reached by a
-REPORT never moves back (a stale report cannot lower it). A stage only the tracker proved is
+Before the station's cap, current = the furthest of the stored history, the reports and the evidence. A stage reached by a
+REPORT never moves back (a stale report cannot lower it); only the station's cap holds the SHOWN stage lower. A stage only the tracker proved is
 withdrawn when a fresh, complete read (no `error`, no `warning`) no longer proves it (a reopened item, another PR opened),
 down to what the reports and the evidence still hold. The history records ADVANCES (at most one
 entry per stage, stage order, so its times need not ascend), each `{stage, at, source, detail}`:

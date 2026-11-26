@@ -815,9 +815,10 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   Azure DevOps item's own state counts too (#561): Committed or Parked shows PR open, Merged or Ready
   for test shows Merged, Done shows Tested; a Removed item is not taken as fixed just because it is closed.
   For an Azure DevOps item its station is the authority (#569): the companion shows the state as ADO
-  names it (Parked, Ready for test, ...) where it shows a stage, and the stage is held to it - Committed
-  and Parked show at most In review, Reopen at most Fixing - whatever a session reported when its pull
-  request merged into a feature branch. GitHub items keep the generic stage.
+  names it (Parked, Ready for test, ...) in place of the stage label on a subject's row and its progress
+  track, and the stage is held to it - Committed and Parked show at most In review, Reopen at most
+  Fixing - whatever a session reported when its pull request merged into a feature branch (the stage
+  bars count such an item under that held stage). GitHub items keep the generic stage.
 - **Subjects (#504):** `GET /api/mc/subjects` joins every server's sessions on the work item they
   report into one subject each (live sessions and the week's closed ones), with its details, stage,
   what it waits on and the runs (an orchestrator and its helper sessions) that group several;

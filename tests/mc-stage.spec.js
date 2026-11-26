@@ -225,9 +225,17 @@ test.describe("#569 an ADO item's station is the authority", () => {
   });
 
   test('a cap only lowers: a stage under it stays, and no stage stays none', () => {
-    expect(fold(ado({ state: 'Parked' }), [{ stage: 'in-review', at: T0 }]).stage.current).toBe('in-review');
+    const atCap = fold(ado({ state: 'Parked' }), [{ stage: 'in-review', at: T0 }]).stage;
+    expect(atCap.current).toBe('in-review');
+    // The step AT the cap stays in the served history (only steps beyond it are left out).
+    expect(atCap.history.map((h) => h.stage)).toEqual(['pr-open', 'in-review']);
     expect(fold(ado({ state: 'Reopen' }), [{ stage: 'planned', at: T0 }]).stage.current).toBe('planned');
     expect(fold(ado({ state: 'Reopen' })).stage).toMatchObject({ current: null, station: 'Reopen' });
+  });
+
+  test('the cap reads the state trimmed and with no regard to case', () => {
+    expect(fold(ado({ state: ' PARKED ' }), merged).stage).toMatchObject({ current: 'in-review', station: 'PARKED' });
+    expect(fold(ado({ state: 'reopen' }), merged).stage.current).toBe('fixing');
   });
 
   test('every other station caps nothing but is still the station', () => {
