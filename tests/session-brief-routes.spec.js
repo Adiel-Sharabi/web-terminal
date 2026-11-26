@@ -121,15 +121,15 @@ test.describe('#298 sessions dashboard — server wiring', () => {
   });
 
   test('asks are a standing list: refused when incomplete, kept by every other report, marked by a typed prompt, ended by the card\'s answer (#526)', async () => {
-    const ask = (question) => ({ question, context: `why ${question}`, options: [{ label: 'A' }, { label: 'B' }] });
+    const ask = (question) => ({ question, context: `why ${question}`, options: [{ label: 'Postgres' }, { label: 'SQLite' }] });
     await hook(id, 'UserPromptSubmit', { prompt: 'go' });
-    const bad = await report(id, { headline: 'h', asks: [{ question: 'which DB?', options: [{ label: 'A' }, { label: 'B' }] }] });
+    const bad = await report(id, { headline: 'h', asks: [{ question: 'which DB?', options: [{ label: 'Postgres' }, { label: 'SQLite' }] }] });
     expect(bad.status).toBe(400);
     expect(bad.json.error).toContain('asks[0] needs a "context"');
     const ok = await report(id, { headline: 'h', wait: { on: 'external', what: 'CI' }, asks: [ask('which DB?'), ask('rename the flag?')] });
     expect(ok.status).toBe(200);
     expect(ok.json.brief.asks.map((a) => a.question)).toEqual(['which DB?', 'rename the flag?']);
-    expect(ok.json.brief.asks[0]).toMatchObject({ context: 'why which DB?', options: [{ label: 'A' }, { label: 'B' }], maybeAnswered: false, id: expect.stringMatching(/^[0-9a-f]{8}$/) });
+    expect(ok.json.brief.asks[0]).toMatchObject({ context: 'why which DB?', options: [{ label: 'Postgres' }, { label: 'SQLite' }], maybeAnswered: false, id: expect.stringMatching(/^[0-9a-f]{8}$/) });
     // A report that names none keeps them - a self wait, and a done - and the list reaches the session list.
     for (const wait of [{ on: 'self', what: 'build' }, { on: 'done', what: '' }]) expect((await report(id, { wait })).status).toBe(200);
     expect((await briefOf(ctx, id)).asks.map((a) => a.question)).toEqual(['which DB?', 'rename the flag?']);

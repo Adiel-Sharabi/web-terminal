@@ -501,8 +501,127 @@ test.describe('wait and hidden (#313, #314)', () => {
     // one stage clause on the States line; #522 by the one action line; #526 by the one `asks` line (the decisions the session
     // holds for the owner without stopping: without it they live only in the reply text, and a
     // finished session's open decisions were never seen); #541 by the one `ref` line (without it a card
-    // cannot say which of the session's items it is about, and shows none).
-    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2800);
+    // cannot say which of the session's items it is about, and shows none); #570 by the one sentence
+    // that a card is read alone (the validator refuses a lettered option and teaches the rest).
+    expect(B.instructionText(e, cmd).length).toBeLessThanOrEqual(2900);
+  });
+});
+
+// #570 - a card is read ALONE: an ask or decision may not lean on an option the agent defined only
+// in its chat ("option C", "B only", "staged from B", a label that is a letter). The negative tests
+// carry the weight: ordinary text with capitals must still be accepted.
+test.describe('a card stands alone (#570)', () => {
+  const opt = (label, consequence) => (consequence ? { label, consequence } : { label });
+  const ask = (over = {}) => ({
+    question: 'Which rollout do we take?',
+    context: 'The plan as drawn stages the PR behind CI. Ready for test on ado:25512.',
+    options: [opt('Stage the rollout', 'Safer, a week slower'), opt('Ship it now')],
+    ...over,
+  });
+  const asked = (a) => B.validateReport({ asks: [a] }, B.applyReport(B.emptyEntry(), { headline: 'h' }, T0));
+  const waited = (d) => B.validateReport({ headline: 'h', wait: { on: 'you', what: 'pick', decision: d } });
+
+  test('the seen failure: "C staged from B" / "B only" with "Option C ... staged from B" is refused on an ask AND on a wait decision', () => {
+    const seen = ask({
+      question: 'Which one?',
+      context: 'Option C ... staged from B is the plan\'s base',
+      options: [opt('C staged from B'), opt('B only')],
+    });
+    for (const r of [asked(seen), waited(seen)]) {
+      expect(r.report).toBeUndefined();
+      expect(r.error).toContain('defined only in your chat');
+      expect(r.error).toContain('say what each choice IS');
+    }
+  });
+
+  const REFUSED = [
+    ['context', { context: 'Option C is the safer one' }, 'Option C'],
+    ['context', { context: 'We could take approach b... no, approach B, as planned' }, 'approach B'],
+    ['context', { context: 'Plan A needs a restart' }, 'Plan A'],
+    ['context', { context: 'both variants D and E; variant E is smaller' }, 'variants D'],
+    ['context', { context: 'The alternative Z costs more' }, 'alternative Z'],
+    ['context', { context: 'Options A and B differ in cost' }, 'Options A'],
+    ['context', { context: 'staged from B, then widened' }, 'staged from B'],
+    ['context', { context: 'Do B only for now' }, 'B only'],
+    ['question', { question: 'Option B or option C?' }, 'Option B'],
+    ['question', { question: 'Go with B only?' }, 'B only'],
+    ['options[0].label', { options: [opt('C'), opt('Ship it now')] }, '"C"'],
+    ['options[1].label', { options: [opt('Stage the rollout'), opt('(B)')] }, '"(B)"'],
+    ['options[0].label', { options: [opt('A: back off'), opt('Ship it now')] }, 'A: back off'],
+    ['options[0].label', { options: [opt('B) keep'), opt('Ship it now')] }, 'B) keep'],
+    ['options[0].label', { options: [opt('C - widen'), opt('Ship it now')] }, 'C - widen'],
+    ['options[0].label', { options: [opt('Option C'), opt('Ship it now')] }, 'Option C'],
+    ['options[0].label', { options: [opt('B only'), opt('Ship it now')] }, 'B only'],
+    ['options[1].label', { options: [opt('Stage the rollout'), opt('C staged from B')] }, 'staged from B'],
+    ['options[0].consequence', { options: [opt('Stage the rollout', 'Same as option B'), opt('Ship it now')] }, 'option B'],
+  ];
+  for (const [field, over, quote] of REFUSED) {
+    test(`refused, naming ${field} and quoting the reference: ${JSON.stringify(over).slice(0, 70)}`, () => {
+      for (const r of [asked(ask(over)), waited(ask(over))]) {
+        expect(r.report).toBeUndefined();
+        expect(r.error).toContain(field);
+        expect(r.error).toContain(quote);
+        expect(r.error).toContain('plain words');
+      }
+    });
+  }
+
+  // The negatives: everything a real card says that is NOT a lettered option.
+  const ACCEPTED = [
+    ['context', { context: 'The PR is green on CI; the plan as drawn holds.' }],
+    ['context', { context: 'Plan as drawn stages it; Ready for test on ado:25512 (PR #570).' }],
+    ['context', { context: 'Option to retry exists. Choose an option and plan a fix; approach a bug from the log.' }],
+    ['context', { context: 'It runs only on CI, and PR only runs the quick suite. Seen only on Windows.' }],
+    ['context', { context: 'I only tested it on Home; as for option I\'d pick the first.' }],
+    ['context', { context: 'See plan C:\\dev\\web-terminal\\docs and option C:/dev/x' }],
+    ['context', { context: 'Approach and alternative both fit; a variant of the plan.' }],
+    ['context', { context: 'Staged from the pilot group, then everyone. Built from main.' }],
+    // A letter after a hyphen is a part, a connector or a flag, never an option (review of #572).
+    ['context', { context: 'The S25 charges on USB-C only; pass -C only to git, and grep -R only on lib.' }],
+    ['context', { context: 'HDMI-A only, and a USB-C only cable.' }],
+    // The keyword and its letter must share a line: context keeps its paragraphs.
+    ['context', { context: 'We follow the release plan\nA rollback takes an hour' }],
+    ['context', { context: 'It was staged from\nA pilot group, then widened' }],
+    ['question', { question: 'Ready for test, or merge now?' }],
+    ['question', { question: 'Do we ship the PR behind CI?' }],
+    ['options[0].label', { options: [opt('Plan as drawn'), opt('Ready for test')] }],
+    ['options[0].label', { options: [opt('Option to retry'), opt('PR first')] }],
+    ['options[0].label', { options: [opt('A fix now'), opt('A new PR')] }],
+    ['options[0].label', { options: [opt('CI only'), opt('Ship ado:25512')] }],
+    ['options[0].label', { options: [opt('Yes'), opt('No')] }],
+    ['options[0].label', { options: [opt('B-tree index'), opt('U-turn')] }],
+    ['options[0].consequence', { options: [opt('Stage'), opt('Ship', 'Ready for test; plan as drawn; PR only after CI')] }],
+  ];
+  for (const [field, over] of ACCEPTED) {
+    test(`accepted, ordinary text in ${field}: ${JSON.stringify(over).slice(0, 70)}`, () => {
+      for (const r of [asked(ask(over)), waited(ask(over))]) {
+        expect(r.error).toBeUndefined();
+        expect(r.report).toBeDefined();
+      }
+    });
+  }
+
+  test('the plain card from the issue, once rewritten, is accepted unchanged', () => {
+    const r = asked(ask());
+    expect(r.error).toBeUndefined();
+    expect(r.report.asks[0].options.map((o) => o.label)).toEqual(['Stage the rollout', 'Ship it now']);
+  });
+
+  test('the check runs on the text AS SENT: a reference past the clip limit is still refused', () => {
+    const r = asked(ask({ context: `${'plain words '.repeat(120)} so option C wins` }));
+    expect(r.error).toContain('option C');
+  });
+
+  test('the refusal quotes a short, one-line hit, never a long run of spaces or a line break', () => {
+    const r = asked(ask({ context: `option${' '.repeat(5000)}C wins` }));
+    expect(r.error).toContain('defined only in your chat');
+    expect(r.error.length).toBeLessThan(900);
+    const q = asked(ask({ context: 'take option \u00a0 C' }));
+    expect(q.error).toContain('"option C"');
+  });
+
+  test('the note teaches it in one sentence', () => {
+    expect(B.instructionText(null, 'CMD')).toContain('say what each choice IS, never an option or letter defined only in your chat');
   });
 });
 
@@ -749,7 +868,7 @@ test.describe('wait.kind action (#522)', () => {
       [act({ kind: 3 }), 'is not "action"'],
       [act({ on: 'self' }), 'rides only on a "you" wait'],
       [act({ on: 'external' }), 'rides only on a "you" wait'],
-      [act({ decision: { question: 'A or B?', options: [{ label: 'A' }, { label: 'B' }] } }), 'cannot go together'],
+      [act({ decision: { question: 'Left or right?', options: [{ label: 'Left' }, { label: 'Right' }] } }), 'cannot go together'],
       [act({ what: '  ' }), 'needs a "what"'],
       [act({ steps: [] }), '"steps" must be a list of 1-8 strings'],
       [act({ steps: 'do it' }), '"steps" must be a list'],
