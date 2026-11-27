@@ -16,11 +16,11 @@ const hdrs = (o = {}) => ({ get: (k) => (o[k.toLowerCase()] === undefined ? null
 /** A fetcher answering from a route table: url substring -> {status, json} (or a function). */
 function fakeFetch(table) {
   const calls = [];
-  const fn = async (url, headers) => {
-    calls.push({ url, headers });
+  const fn = async (url, headers, opts) => {
+    calls.push({ url, headers, opts });
     for (const [k, v] of Object.entries(table)) {
       if (url.includes(k)) {
-        const r = typeof v === 'function' ? v(url, headers) : v;
+        const r = typeof v === 'function' ? v(url, headers, opts) : v;
         return { status: r.status, json: r.json === undefined ? null : r.json, headers: hdrs(r.headers) };
       }
     }
@@ -363,5 +363,129 @@ test.describe('#502 cache', () => {
     const out = await c.meta.getMany(refs);
     expect(out.map((m) => m.key)).toEqual(['acme/widgets#1', 'acme/widgets#2', 'ado:5']);
     expect(c.reads.sort()).toEqual(['acme/widgets#1', 'acme/widgets#2', 'ado:5']);
+  });
+});
+
+
+// ---- #567 listing candidates (the work board's sources) -------------------------------------
+
+const ghIssue = (n, over = {}) => ({ number: n, title: `Issue ${n}`, state: 'open', html_url: `https://github.com/acme/widgets/issues/${n}`,
+  user: { login: 'someone' }, created_at: `2026-01-${String(n).padStart(2, '0')}T00:00:00Z`, labels: [], ...over });
+const adoWi = (id, over = {}) => ({ id, fields: { 'System.Title': `WI ${id}`, 'System.WorkItemType': 'Bug', 'System.State': 'Approved', 'System.TeamProject': 'Contoso',
+  'System.CreatedDate': '2026-02-03T04:05:06Z', 'Microsoft.VSTS.Common.StateChangeDate': '2026-03-04T05:06:07Z', 'Microsoft.VSTS.Common.Priority': 2,
+  'Microsoft.VSTS.Common.Severity': '3 - Medium', ...over } });
+
+test.describe('#567 list readers: GitHub', () => {
+  const R = { apiBase: 'https://gh.test', token: 'tok' };
+  test('open issues of one repo, pull requests dropped, oldest first as GitHub gave them, labels read as priority and severity', async () => {
+    const fetchJson = fakeFetch({ '/repos/acme/widgets/issues?': { status: 200, json: [
+      ghIssue(1, { labels: [{ name: 'P1' }, { name: 'severity:2' }] }), ghIssue(2, { pull_request: { url: 'x' } }), ghIssue(3)] } });
+    const out = await tm.listGithubIssues({ owner: 'Acme', repo: 'Widgets' }, { fetchJson, ...R });
+    expect(out.items.map((i) => i.key)).toEqual(['acme/widgets#1', 'acme/widgets#3']);
+    expect(out.items[0]).toMatchObject({ tracker: 'github', repo: 'acme/widgets', title: 'Issue 1', priority: 1, severity: 2, state: 'open', closed: false });
+    expect(out.total).toBe(2);
+    expect(out.more).toBe(false);
+    const c = fetchJson.calls[0];
+    expect(c.url).toBe('https://gh.test/repos/acme/widgets/issues?state=open&sort=created&direction=asc&per_page=100');
+    expect(c.headers.Authorization).toBe('Bearer tok'); // the SAME token path as the item reader
+    expect(c.opts).toBeUndefined(); // a GET
+  });
+
+  test('a full page says there may be more; a rejected token is retried anonymously, like the item reader', async () => {
+    const page = Array.from({ length: 100 }, (_, i) => ghIssue(i + 1));
+    const fetchJson = fakeFetch({ '/issues?': (url, h) => (h.Authorization ? { status: 401, json: { message: 'Bad credentials' } } : { status: 200, json: page }) });
+    const out = await tm.listGithubIssues({ owner: 'acme', repo: 'widgets' }, { fetchJson, ...R });
+    expect(out.more).toBe(true);
+    expect(fetchJson.calls.map((c) => Boolean(c.headers.Authorization))).toEqual([true, false]);
+  });
+
+  test('a failing tracker is a TrackerError in words, and a bad repo asks nothing', async () => {
+    const fetchJson = fakeFetch({ '/issues?': { status: 500, json: { message: 'boom' } } });
+    await expect(tm.listGithubIssues({ owner: 'acme', repo: 'widgets' }, { fetchJson, apiBase: 'https://gh.test', token: null })).rejects.toThrow('GitHub answered HTTP 500');
+    await expect(tm.listGithubIssues({ owner: '..', repo: 'widgets' }, { fetchJson, apiBase: 'https://gh.test', token: null })).rejects.toBeInstanceOf(tm.TrackerError);
+    expect(fetchJson.calls).toHaveLength(1);
+  });
+});
+
+test.describe('#567 list readers: Azure DevOps', () => {
+  const D = { adoBase: 'https://ado.test', org: 'fakeorg', pat: 'pat' };
+  const table = () => ({
+    '/_apis/wit/wiql': { status: 200, json: { workItems: [{ id: 3 }, { id: 1 }, { id: 2 }] } },
+    '/_apis/wit/workitems?ids=3,1,2': { status: 200, json: { count: 3, value: [adoWi(1), adoWi(2), adoWi(3)] } }, // not in query order
+  });
+  const spec = { project: 'Contoso', states: ['Approved', 'Reopen'], types: ['Bug', 'Task'] };
+
+  test('one WIQL POST (the tracker orders by priority, severity, oldest) and one GET for details; the query order is kept', async () => {
+    const fetchJson = fakeFetch(table());
+    const out = await tm.listAdoWorkItems(spec, { fetchJson, ...D });
+    expect(out.items.map((i) => i.key)).toEqual(['ado:3', 'ado:1', 'ado:2']);
+    expect(out.items[0]).toMatchObject({ tracker: 'ado', ref: 'ado:3', title: 'WI 3', type: 'Bug', state: 'Approved', adoProject: 'Contoso', priority: 2, severity: 3,
+      url: 'https://dev.azure.com/fakeorg/_workitems/edit/3' });
+    expect(out.items[0].stateAt).toBe(Date.parse('2026-03-04T05:06:07Z'));
+    expect(out.total).toBe(3);
+    expect(out.more).toBe(false);
+    const [q, d] = fetchJson.calls;
+    expect(q.url).toBe('https://ado.test/fakeorg/Contoso/_apis/wit/wiql?$top=500&api-version=7.1');
+    expect(q.opts.method).toBe('POST');
+    expect(q.headers['Content-Type']).toBe('application/json');
+    expect(q.headers.Authorization).toBe(`Basic ${Buffer.from(':pat').toString('base64')}`);
+    const wiql = JSON.parse(q.opts.body).query;
+    expect(wiql).toContain("[System.TeamProject] = 'Contoso'");
+    expect(wiql).toContain("[System.State] IN ('Approved', 'Reopen')");
+    expect(wiql).toContain("[System.WorkItemType] IN ('Bug', 'Task')");
+    expect(wiql).toMatch(/ORDER BY \[Microsoft\.VSTS\.Common\.Priority\] ASC, \[Microsoft\.VSTS\.Common\.Severity\] ASC, \[System\.CreatedDate\] ASC$/);
+    expect(d.url).toContain('/fakeorg/_apis/wit/workitems?ids=3,1,2&fields=System.Title,');
+    expect(d.opts).toBeUndefined(); // the details are a GET
+  });
+
+  test('only the first details-window of ids is read, the count says how many the query matched', async () => {
+    const ids = Array.from({ length: 80 }, (_, i) => ({ id: i + 1 }));
+    const fetchJson = fakeFetch({
+      '/_apis/wit/wiql': { status: 200, json: { workItems: ids } },
+      '/_apis/wit/workitems?ids=': (url) => ({ status: 200, json: { value: url.split('ids=')[1].split('&')[0].split(',').map((n) => adoWi(Number(n))) } }),
+    });
+    const out = await tm.listAdoWorkItems(spec, { fetchJson, ...D });
+    expect(out.items).toHaveLength(60);
+    expect(out.total).toBe(80);
+  });
+
+  test('no match asks for no details', async () => {
+    const fetchJson = fakeFetch({ '/_apis/wit/wiql': { status: 200, json: { workItems: [] } } });
+    expect(await tm.listAdoWorkItems(spec, { fetchJson, ...D })).toEqual({ items: [], total: 0, more: false });
+    expect(fetchJson.calls).toHaveLength(1);
+  });
+
+  test('a name that could leave its WIQL string is refused before any request, and so is a missing org or token', async () => {
+    const fetchJson = fakeFetch(table());
+    for (const bad of [{ ...spec, project: "x' OR 1=1 --" }, { ...spec, states: ["Approved'] OR ['"] }, { ...spec, types: ['Bug]'] }, { ...spec, states: [] }]) {
+      await expect(tm.listAdoWorkItems(bad, { fetchJson, ...D })).rejects.toThrow('plain names');
+    }
+    await expect(tm.listAdoWorkItems(spec, { fetchJson, ...D, org: null })).rejects.toThrow('no Azure DevOps organization');
+    await expect(tm.listAdoWorkItems(spec, { fetchJson, ...D, pat: null })).rejects.toThrow('no Azure DevOps token');
+    expect(fetchJson.calls).toHaveLength(0);
+  });
+
+  test('a rejected token (a sign-in redirect) names the token, like the item reader', async () => {
+    const fetchJson = fakeFetch({ '/_apis/wit/wiql': { status: 302, json: null } });
+    await expect(tm.listAdoWorkItems(spec, { fetchJson, ...D })).rejects.toThrow('rejected the token');
+  });
+
+  test('createListReader shares the item reader\'s fetcher, tokens and org', async () => {
+    const fetchJson = fakeFetch({ ...table(), '/repos/acme/widgets/issues?': { status: 200, json: [ghIssue(1)] } });
+    const r = tm.createListReader({ fetchJson, githubApi: 'https://gh.test', adoBase: 'https://ado.test', githubToken: async () => 'gh-t', adoOrg: () => 'fakeorg', adoPat: async () => 'ado-t' });
+    expect((await r.github({ owner: 'acme', repo: 'widgets' })).items).toHaveLength(1);
+    expect((await r.ado(spec)).items).toHaveLength(3);
+    expect(fetchJson.calls[0].headers.Authorization).toBe('Bearer gh-t');
+    expect(fetchJson.calls[1].headers.Authorization).toBe(`Basic ${Buffer.from(':ado-t').toString('base64')}`);
+  });
+});
+
+test.describe('#567 stateAt: when an item entered its current state', () => {
+  test('ADO: the state-change date; GitHub: when it closed (an open issue has none)', () => {
+    expect(tm.parseAdoWorkItem(adoWi(1), []).stateAt).toBe(Date.parse('2026-03-04T05:06:07Z'));
+    expect(tm.parseAdoWorkItem({ id: 1, fields: {} }, []).stateAt).toBeNull();
+    expect(tm.parseGithubIssue(ghIssue(1), []).stateAt).toBeNull();
+    expect(tm.parseGithubIssue(ghIssue(1, { state: 'closed', closed_at: '2026-05-06T07:08:09Z' }), []).stateAt).toBe(Date.parse('2026-05-06T07:08:09Z'));
+    expect(tm.blankMeta(tm.parseRef('ado:1')).stateAt).toBeNull();
   });
 });

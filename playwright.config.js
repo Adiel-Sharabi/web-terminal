@@ -220,6 +220,8 @@ module.exports = defineConfig({
       WT_MC_ADO_URL: 'http://127.0.0.1:17688/ado',
       WT_MC_GITHUB_TOKEN: 'suite-github-token',
       WT_MC_ADO_PAT: 'suite-ado-pat',
+      // #567 - the work board's own-repo source reads this repo from the fake tracker (never the checkout's origin).
+      WT_MC_BOARD_OWN_REPO: 'acme/own',
     },
     reuseExistingServer: false,
     timeout: 30000,

@@ -461,6 +461,15 @@ class ApiClient {
     return McEfforts.fromJson(m);
   }
 
+  /// #567 - the work board: current work in columns and the next candidates per source
+  /// (`GET /api/mc/board`). A server without it answers 404; an answer with no `columns` list is
+  /// no board (status 0). [refresh] asks the server to read the candidate sources again now.
+  Future<McBoard> mcBoard({bool refresh = false}) async {
+    final m = await _mcGet('/api/mc/board', query: refresh ? const {'refresh': '1'} : null);
+    if (m['columns'] is! List) throw const ApiException(0, 'the answer has no board');
+    return McBoard.fromJson(m);
+  }
+
   /// Every project with its areas and counts (`GET /api/mc/projects`).
   Future<McProjects> mcProjects() async => McProjects.fromJson(await _mcGet('/api/mc/projects'));
 
