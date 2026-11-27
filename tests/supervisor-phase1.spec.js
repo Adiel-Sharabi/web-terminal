@@ -349,7 +349,7 @@ test.describe('#466 the cluster work graph and the orphan rule', () => {
     expect(SV.noteOrphans(k1.sightings, scan(servers, T0 + 5 * MIN), { ...cfg, known }).verdicts[ID(3)].state).toBe('orphan');
     // The known set is bounded, newest kept.
     const big = SV.knownIds(new Set([ID(1), ID(2)]), scan([{ name: 'O', ok: true, sessions: [row(ID(5))] }], T0), [], 2);
-    expect([...big]).toEqual([ID(2), ID(5)]);
+    expect([...big.keys()]).toEqual([ID(2), ID(5)]);
   });
 
   test('a new parentId restarts the clock; no scan at all is never complete', () => {

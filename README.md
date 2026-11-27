@@ -363,9 +363,12 @@ takes no action on any session yet.
   prompt, no restart hold or hand-off, nobody typing); otherwise it answers `refused` with why.
 - On the lease authority (`leases.authority`) only, every server is polled each minute into one
   work graph (`GET /api/supervisor/state`: sessions, leads and children through hand-offs, Needs you,
-  Live, Ready to close, History). A session whose lead is gone from **every** server, on two scans at
-  least 5 minutes apart with every server answering, is marked an orphan; a server that does not
-  answer makes it "unknown", never an orphan. Changes are logged to `handoffs/supervisor-log.jsonl`.
+  Live, Ready to close, History). A session whose lead is no longer listed by the server that lead was
+  last seen on, on two scans at least 5 minutes apart with that server answering, is marked an orphan
+  (#562: sessions never move between servers, so another peer being down for days does not blind it; the
+  cluster-wide `complete` flag still says whether every server answered); a lead whose own server did not
+  answer, or one the supervisor never saw, makes it "unknown", never an orphan. Changes are logged to
+  `handoffs/supervisor-log.jsonl`.
   Config `supervisor`: `enabled` (default true), `exclude` (server names left out entirely),
   `everySec` (default 60).
 

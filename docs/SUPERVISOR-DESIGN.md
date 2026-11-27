@@ -114,7 +114,7 @@ such as summarising a dead session for its replacement's brief.
 
 | `target.kind` | fields | resolved when | gone when |
 |---|---|---|---|
-| `session` | `id` (any machine; `replaces` aliases followed) | target reported `done`, or its turn ended with a new report | absent from **every** server, on two scans ≥ 5 min apart, with every server answering |
+| `session` | `id` (any machine; `replaces` aliases followed) | target reported `done`, or its turn ended with a new report | absent from the server it was last seen on, on two scans ≥ 5 min apart, with THAT server answering (#562: another peer being down proves nothing about it; an id with no server on record needs every server to answer; one never seen is `unknown`) |
 | `lead` | (none: the session's own `spawn.parentId`) | as `session` | as `session` |
 | `pr` | `provider` `github`\|`ado`, `repo`, `number` | merged, closed, or a new review or vote | not found |
 | `ci` | `provider`, `pr` or `runId` | the run finished (any result) | not found |
