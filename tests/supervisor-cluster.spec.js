@@ -20,6 +20,42 @@ const { emptyCwd } = require('./test-helpers');
 const { ROOT, CONFIRM_MS, sleep, until, startServer, bearer } = require('./supervisor-rig');
 
 
+// The fake agent's launch line and the helpers the #467 and #562 describes share: a hook call,
+// a report, an agent session that has run one turn, a server's supervisor log.
+const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
+const hookToken = () => fs.readFileSync(path.join(ROOT, '.hook-token'), 'utf8').trim();
+const hook = async (base, id, event, body = {}) => {
+  const c = await pwRequest.newContext({ baseURL: base });
+  const r = await c.post('/api/hook', { data: { hook_event_name: event, ...body }, headers: { 'X-WT-Hook-Token': hookToken(), 'X-WT-Session-ID': id } });
+  await c.dispose();
+  expect(r.status()).toBe(200);
+};
+const report = async (base, id, body) => {
+  const c = await pwRequest.newContext({ baseURL: base });
+  const r = await c.post(`/api/session/${id}/report`, { data: body, headers: { 'X-WT-Hook-Token': hookToken() } });
+  const t = await r.text();
+  await c.dispose();
+  expect(r.status(), t).toBe(200);
+};
+/** An agent session on [ctx] that is ready, has run one turn reporting [wait], and is idle. */
+const turnWith = async (ctx, base, label, wait) => {
+  const r = await ctx.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label), agent: 'claude', autoCommand: LAUNCH } });
+  expect(r.ok(), await r.text()).toBe(true);
+  const id = (await r.json()).id;
+  const row = async () => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
+  await until(async () => (await row())?.agentReady === true, `${label} ready`);
+  const conv = crypto.randomUUID();
+  await hook(base, id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' });
+  await report(base, id, { items: [{ ref: '#1', title: 'phase 2', state: 'in-progress' }], wait });
+  await hook(base, id, 'Stop', { session_id: conv });
+  await until(async () => (await row())?.status === 'idle', `${label} idle`);
+  return id;
+};
+const supLogIn = (dir) => {
+  const f = path.join(dir, 'handoffs', 'supervisor-log.jsonl');
+  return (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+};
+
 test.describe.serial('#466 the supervisor across two servers', () => {
   test.setTimeout(120000);
   const portA = 17990 + Math.floor(Math.random() * 20);
@@ -48,10 +84,7 @@ test.describe.serial('#466 the supervisor across two servers', () => {
   };
   const state = async () => (await a.get('/api/supervisor/state')).json();
   const node = (st, id) => (st.sessions || []).find((n) => n.id === id);
-  const supLog = () => {
-    const f = path.join(dirA, 'handoffs', 'supervisor-log.jsonl');
-    return (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  };
+  const supLog = () => supLogIn(dirA);
 
   test.beforeAll(async () => {
     dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'wt466-A-'));
@@ -135,7 +168,6 @@ test.describe.serial('#466 the supervisor across two servers', () => {
 test.describe.serial('#467 the supervisor wakes and reaches the owner across two servers', () => {
   test.setTimeout(120000);
   const TAG = '[web-terminal supervisor]';
-  const LAUNCH = "printf '\\xe2\\x9d\\xaf\\xc2\\xa0 ready\\n\\x1b[>0q'; echo claude";
   const portA = 18040 + Math.floor(Math.random() * 20);
   const portB = portA + 25;
   const urlA = `http://127.0.0.1:${portA}`;
@@ -153,38 +185,6 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
     }));
     fs.writeFileSync(path.join(dir, 'api-tokens.json'), JSON.stringify({ [token]: { label: 'supervisor-spec', created: Date.now(), expires: Date.now() + 3600e3 } }));
     fs.writeFileSync(path.join(dir, 'cluster-tokens.json'), JSON.stringify({ [peerUrl]: { token: peerToken, name: peerName, authenticated: Date.now() } }));
-  };
-  const hookToken = () => fs.readFileSync(path.join(ROOT, '.hook-token'), 'utf8').trim();
-  const hook = async (base, id, event, body = {}) => {
-    const c = await pwRequest.newContext({ baseURL: base });
-    const r = await c.post('/api/hook', { data: { hook_event_name: event, ...body }, headers: { 'X-WT-Hook-Token': hookToken(), 'X-WT-Session-ID': id } });
-    await c.dispose();
-    expect(r.status()).toBe(200);
-  };
-  const report = async (base, id, body) => {
-    const c = await pwRequest.newContext({ baseURL: base });
-    const r = await c.post(`/api/session/${id}/report`, { data: body, headers: { 'X-WT-Hook-Token': hookToken() } });
-    const t = await r.text();
-    await c.dispose();
-    expect(r.status(), t).toBe(200);
-  };
-  /** An agent session on [ctx] that is ready, has run one turn reporting [wait], and is idle. */
-  const turnWith = async (ctx, base, label, wait) => {
-    const r = await ctx.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label), agent: 'claude', autoCommand: LAUNCH } });
-    expect(r.ok(), await r.text()).toBe(true);
-    const id = (await r.json()).id;
-    const row = async () => (await (await ctx.get('/api/sessions')).json()).find((s) => s.id === id);
-    await until(async () => (await row())?.agentReady === true, `${label} ready`);
-    const conv = crypto.randomUUID();
-    await hook(base, id, 'UserPromptSubmit', { session_id: conv, prompt: 'work' });
-    await report(base, id, { items: [{ ref: '#1', title: 'phase 2', state: 'in-progress' }], wait });
-    await hook(base, id, 'Stop', { session_id: conv });
-    await until(async () => (await row())?.status === 'idle', `${label} idle`);
-    return id;
-  };
-  const supLog = (dir) => {
-    const f = path.join(dir, 'handoffs', 'supervisor-log.jsonl');
-    return (fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
   };
   const state = async () => (await a.get('/api/supervisor/state')).json();
   const ownerPushes = (id) => sink.filter((m) => m.data.kind === 'owner-wait' && m.data.sessionId === id);
@@ -211,16 +211,16 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
   test('R1: a wait on the peer whose target resolves is woken with the fact, once', async () => {
     const at = new Date(Date.now() + 2000).toISOString();
     const id = await turnWith(b, B.base, 'sup-wake-b', { on: 'external', what: 'the timer', target: { kind: 'time', until: at } });
-    const wake = await until(async () => supLog(dirA).find((l) => l.event === 'wake' && l.id === id), 'the wake', 40000);
+    const wake = await until(async () => supLogIn(dirA).find((l) => l.event === 'wake' && l.id === id), 'the wake', 40000);
     expect(wake).toMatchObject({ server: 'bravo', rule: 'R1' });
     expect(wake.text).toBe(`Your wait "the timer" changed: the time ${at} has passed. Carry on, or report a new wait.`);
     // Typed on B, through B's own gate.
     // The scrollback route answers JSON: read its text, never the escaped body (a `"` is `\"` there).
     await until(async () => (await (await b.get(`/api/sessions/${id}/scrollback`)).json()).data.includes(`${TAG} Your wait "the timer" changed`), 'the prompt on B');
-    expect(supLog(dirB).some((l) => l.event === 'prompt-delivered' && l.id === id)).toBe(true);
+    expect(supLogIn(dirB).some((l) => l.event === 'prompt-delivered' && l.id === id)).toBe(true);
     // Once: the same wait is never woken again.
     await sleep(4000);
-    expect(supLog(dirA).filter((l) => l.event === 'wake' && l.id === id)).toHaveLength(1);
+    expect(supLogIn(dirA).filter((l) => l.event === 'wake' && l.id === id)).toHaveLength(1);
     const n = (await state()).sessions.find((x) => x.id === id);
     expect(n.waitState).toMatchObject({ state: 'resolved' });
     expect(n.supervisor[0]).toMatchObject({ rule: 'R1', outcome: 'delivered' });
@@ -243,11 +243,11 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
     await sleep(4000);
     await drain();
     expect(ownerPushes(id)).toHaveLength(1);
-    expect(supLog(dirA).some((l) => l.event === 'owner-summary')).toBe(false);
+    expect(supLogIn(dirA).some((l) => l.event === 'owner-summary')).toBe(false);
     // Quiet ends: ONE summary push.
     expect((await a.post('/api/test/quiet', { data: { quiet: false } })).ok()).toBe(true);
     await until(async () => { await drain(); return ownerPushes(id).length === 2; }, 'the summary push', 20000);
-    expect(supLog(dirA).filter((l) => l.event === 'owner-summary')).toEqual([expect.objectContaining({ count: 1 })]);
+    expect(supLogIn(dirA).filter((l) => l.event === 'owner-summary')).toEqual([expect.objectContaining({ count: 1 })]);
     await sleep(3000);
     await drain();
     expect(ownerPushes(id)).toHaveLength(2);
@@ -287,5 +287,92 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
     expect(approvals(kept)).toHaveLength(1);
     expect(approvals(answered)).toEqual([]);
     for (const id of [kept, answered]) await a.delete(`/api/sessions/${id}`);
+  });
+});
+
+// #562 - one peer that is down for good must not blind the supervisor. Three servers in A's
+// cluster list: alpha (the lease authority, where the supervisor runs), bravo (a peer that
+// answers) and charlie (nobody listens: its scan fails every time, so `complete` stays false,
+// as Office-Tests did for days on 2026-11-26). Sessions never move between servers, so a session
+// last seen on bravo is judged from bravo's answer alone. The `unknown` side of the rule is
+// proven in tests/supervisor-absence-562.spec.js (a session recorded on the down server, an id never
+// seen on a complete scan: an e2e here could not tell the never-seen gate from the incomplete scan).
+test.describe.serial('#562 a peer that never answers does not blind the supervisor', () => {
+  test.setTimeout(120000);
+  const portA = 18300 + Math.floor(Math.random() * 20);
+  const portB = portA + 25;
+  const urlA = `http://127.0.0.1:${portA}`;
+  const urlB = `http://127.0.0.1:${portB}`;
+  const urlC = 'http://127.0.0.1:1';
+  const tokA = crypto.randomBytes(32).toString('hex');
+  const tokB = crypto.randomBytes(32).toString('hex');
+  let dirA; let dirB; let A; let B; let a; let b;
+  const files = (dir, self, token, tokens) => {
+    const cluster = [{ name: 'alpha', url: urlA }, { name: 'bravo', url: urlB }, ...(self === urlA ? [{ name: 'charlie', url: urlC }] : [])];
+    fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
+      serverName: self === urlA ? 'alpha' : 'bravo', publicUrl: self, cluster,
+      leases: { authority: 'alpha' }, checkIn: { typingQuietMin: 0.01 }, supervisor: {},
+    }));
+    fs.writeFileSync(path.join(dir, 'api-tokens.json'), JSON.stringify({ [token]: { label: 'supervisor-spec', created: Date.now(), expires: Date.now() + 3600e3 } }));
+    fs.writeFileSync(path.join(dir, 'cluster-tokens.json'), JSON.stringify(Object.fromEntries(Object.entries(tokens)
+      .map(([url, [tok, name]]) => [url, { token: tok, name, authenticated: Date.now() }]))));
+  };
+  const plain = async (ctx, label, extra = {}) => {
+    const r = await ctx.post('/api/sessions', { data: { name: label, cwd: emptyCwd(label), autoCommand: '', ...extra } });
+    expect(r.ok(), await r.text()).toBe(true);
+    return (await r.json()).id;
+  };
+  const state = async () => (await a.get('/api/supervisor/state')).json();
+  const node = (st, id) => (st.sessions || []).find((n) => n.id === id);
+
+  test.beforeAll(async () => {
+    dirA = fs.mkdtempSync(path.join(os.tmpdir(), 'wt562-A-'));
+    dirB = fs.mkdtempSync(path.join(os.tmpdir(), 'wt562-B-'));
+    files(dirA, urlA, tokA, { [urlB]: [tokB, 'bravo'], [urlC]: [crypto.randomBytes(32).toString('hex'), 'charlie'] });
+    files(dirB, urlB, tokB, { [urlA]: [tokA, 'alpha'] });
+    [A, B] = await Promise.all([startServer(dirA, portA, 'a562'), startServer(dirB, portB, 'b562')]);
+    a = await bearer(A.base, tokA);
+    b = await bearer(B.base, tokB);
+  });
+  test.afterAll(async () => {
+    for (const c of [a, b]) { try { await c.dispose(); } catch { /* gone */ } }
+    for (const s of [A, B]) { try { await s.stop(); } catch { /* gone */ } }
+    for (const d of [dirA, dirB]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best effort */ } }
+  });
+
+  test('R1: a lead waiting on a child that was killed on a healthy peer is woken, while another peer is down', async () => {
+    const kid = await plain(b, 'sup-562-kid');
+    const lead = await turnWith(a, A.base, 'sup-562-lead', { on: 'external', what: 'the child', target: { kind: 'child', ids: [kid] } });
+    // The scan is incomplete, and stays so: charlie never answers.
+    const st = await until(async () => { const s = await state(); return node(s, kid) && node(s, lead) ? s : null; }, 'both sessions in the graph');
+    expect(st.complete).toBe(false);
+    expect(st.servers.find((s) => s.name === 'charlie')).toMatchObject({ ok: false });
+    expect(st.servers.find((s) => s.name === 'bravo')).toMatchObject({ ok: true });
+    expect(node(st, kid)).toMatchObject({ server: 'bravo' });
+
+    expect((await b.delete(`/api/sessions/${kid}`)).status()).toBe(200);
+    const wake = await until(async () => supLogIn(dirA).find((l) => l.event === 'wake' && l.id === lead), 'the wake', 60000);
+    expect(wake).toMatchObject({ server: 'alpha', rule: 'R1' });
+    expect(wake.text).toContain('every child is finished (0 reported done, 1 gone)');
+    const after = await state();
+    expect(after.complete).toBe(false); // still no complete scan: the verdict did not wait for one
+    expect(node(after, lead).waitState).toMatchObject({ state: 'resolved' }); // every child done or gone
+    expect(supLogIn(dirA).filter((l) => l.event === 'wake' && l.id === lead)).toHaveLength(1);
+    expect((await a.delete(`/api/sessions/${lead}`)).status()).toBe(200);
+  });
+
+  test('R2: a lead killed on a healthy server makes its child on the other healthy server an orphan, with the third peer down', async () => {
+    const lead = await plain(a, 'sup-562-orphan-lead');
+    const kid = await plain(b, 'sup-562-orphan-kid', { parentId: lead });
+    await until(async () => node(await state(), kid)?.leadId === lead, 'the child under its lead');
+    const closedAt = Date.now();
+    expect((await a.delete(`/api/sessions/${lead}`)).status()).toBe(200);
+    const orphan = await until(async () => { const n = node(await state(), kid); return n && n.orphan && n.orphan.state === 'orphan' ? n.orphan : null; }, 'the orphan verdict', 60000);
+    expect(Date.now() - closedAt).toBeGreaterThanOrEqual(CONFIRM_MS); // the grace step is unchanged
+    expect(orphan).toMatchObject({ parentId: lead });
+    const st = await state();
+    expect(st.complete).toBe(false);
+    expect(st.orphans).toContain(kid);
+    expect((await b.delete(`/api/sessions/${kid}`)).status()).toBe(200);
   });
 });

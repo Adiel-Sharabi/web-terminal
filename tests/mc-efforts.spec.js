@@ -231,14 +231,23 @@ test.describe('#561 efforts: fail CLOSED when a server did not answer (#562)', (
     expect(out.efforts[0]).toMatchObject({ partial: false, missing: [] });
   });
 
-  test('a verdict that rests on ABSENCE (R1 gone, R2 orphan) is unknown, not suspect, while the scan is incomplete', () => {
+  test('a verdict that rests on ABSENCE is the supervisor\'s own: gone/orphan stand while a peer is down, unknown stays unknown (#562)', () => {
+    // The supervisor judges an id's absence from the server it was last seen on, so it states
+    // gone/orphan only where that server answered; the view does not re-blind it with the
+    // cluster-wide `complete` (one peer down for days made every verdict unknown).
     const r = row('alpha', { name: 'w', ...ext('PR 9') });
     const gone = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [ws(r, 'gone', 'PR 9 was not found')] }) }).efforts[0];
-    expect(gone.verdict.kind).toBe('unknown');
-    expect(gone.state).toBe('waiting');
+    expect(gone.verdict).toMatchObject({ kind: 'suspect', rule: 'R1' });
+    expect(gone.state).toBe('stuck');
     const orphan = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [{ id: r.id, orphan: { state: 'orphan' } }] }) }).efforts[0];
-    expect(orphan.verdict.kind).toBe('unknown');
-    expect(orphan.state).toBe('waiting');
+    expect(orphan.verdict).toMatchObject({ kind: 'suspect', rule: 'R2' });
+    expect(orphan.state).toBe('stuck');
+    const opened = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, cases: [{ rule: 'R2', sessionId: r.id, openedAt: NOW - MIN }] }) }).efforts[0];
+    expect(opened.verdict).toMatchObject({ kind: 'suspect', rule: 'R2' });
+    // What the supervisor could not judge (the id's own server did not answer) is still unknown.
+    const unknown = efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, sessions: [{ ...ws(r, 'unknown'), orphan: { state: 'unknown' } }] }) }).efforts[0];
+    expect(unknown.verdict.kind).toBe('unknown');
+    expect(unknown.state).toBe('waiting');
   });
 
   test('machines: an unreachable one is listed, not ok, with no live count it could not know', () => {
@@ -378,11 +387,11 @@ test.describe('#561 efforts: a verdict judges the wait it was about (review of #
     expect(efforts({ rows: [r], supervisor: sup({ sessions: [ws(r, 'resolved', 'PR 941 merged')] }) }).efforts[0].state).toBe('stuck');
   });
 
-  test('an open R2 case rests on absence too: unknown while a server did not answer, suspect when all did', () => {
+  test('an open R2 case is read as the supervisor holds it (#562): it stands only while the orphan verdict does, so a peer being down does not blind it', () => {
     const r = waiter();
     const cases = [{ rule: 'R2', sessionId: r.id, openedAt: NOW - 30 * MIN, resolvedAt: null }];
     const down = [{ name: 'alpha', ok: true }, { name: 'beta', ok: false }];
-    expect(efforts({ rows: [r], servers: down, supervisor: sup({ cases }) }).efforts[0].verdict.kind).toBe('unknown');
+    expect(efforts({ rows: [r], servers: down, supervisor: sup({ complete: false, cases }) }).efforts[0].verdict).toMatchObject({ kind: 'suspect', rule: 'R2' });
     expect(efforts({ rows: [r], supervisor: sup({ cases }) }).efforts[0].verdict).toMatchObject({ kind: 'suspect', rule: 'R2' });
     // A case that does not rest on absence (a stuck session, R3) stays suspect.
     expect(efforts({ rows: [r], servers: down, supervisor: sup({ cases: [{ ...cases[0], rule: 'R3' }] }) }).efforts[0].verdict.kind).toBe('suspect');

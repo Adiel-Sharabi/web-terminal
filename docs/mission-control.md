@@ -712,7 +712,9 @@ ties by the lead's id. Two leads on one line are two efforts.
 **Fail CLOSED (#562).** A server that did not answer (`servers[].ok` false) makes `complete` false. A lead that
 names a parent nobody lists, while incomplete, is `partial: true, missing: [server]` ("its lead may be on X"):
 never called orphaned or gone. A verdict that rests on a session's ABSENCE (R1 `gone`, R2 `orphan`, an open R2 case)
-is `unknown` while incomplete (the supervisor's scan or this view), whatever the state says.
+is read as the supervisor states it: the supervisor judges an id's absence from the server it was last seen on, so it
+says `unknown` where that server did not answer and `gone`/`orphan` for a session on a server that did, whatever other
+peer is down (it is not re-blinded here by the cluster-wide `complete`).
 
 **Not running** = every subject no effort carries, grouped by its line, a group's items sorted by `cls`
 (`idleClassOf`, the one rule): `waits-test` (station Ready for test/Committed/Merged, or stage pr-open..merged;
