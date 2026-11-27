@@ -44,6 +44,8 @@ const CRASH_BUDGET_MAX = parseInt(process.env.WT_MONITOR_CRASH_BUDGET) || 5;
 const BACKOFF_INITIAL = parseInt(process.env.WT_MONITOR_BACKOFF_INITIAL) || 2000;
 const BACKOFF_MAX = parseInt(process.env.WT_MONITOR_BACKOFF_MAX) || 30000;
 const BACKOFF_MULTIPLIER = parseFloat(process.env.WT_MONITOR_BACKOFF_MULT) || 2;
+// #579: how long a web that spent its crash budget waits before the monitor tries it again.
+const WEB_CRASH_COOLDOWN = parseInt(process.env.WT_MONITOR_WEB_COOLDOWN) || 5 * 60 * 1000;
 const WORKER_READY_TIMEOUT = 20000;        // wait up to 20s for pipe to accept a connection
 const WORKER_READY_RETRY_MS = 150;
 
@@ -75,6 +77,7 @@ function makeChildState(name, logFile) {
     recentStderr: '',
     stoppedForever: false,     // crash budget exceeded or port-in-use
     stoppedReason: null,
+    pausedUntil: null,         // #579: end of a crash-budget pause (web only)
     // Used to coordinate restarts: when worker crashes, web's exit is an expected
     // consequence, not a crash. This flag suppresses web's crash handling for one exit.
     expectedExit: false,
@@ -414,11 +417,26 @@ function spawnWeb() {
     web.crashTimestamps = web.crashTimestamps.filter(t => Date.now() - t < CRASH_BUDGET_WINDOW);
 
     if (web.crashTimestamps.length >= CRASH_BUDGET_MAX) {
-      monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — stopping`);
-      web.stoppedForever = true;
+      // #579: a PAUSE, not the end. Stopping for good turned a passing cause (an orphan
+      // server.js holding the worker's one IPC slot) into a box that stayed dark until a
+      // human cold-restarted it. Try again after the cooldown with a fresh budget.
+      monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — pausing, next attempt in ${WEB_CRASH_COOLDOWN/1000}s`);
+      web.stoppedForever = true; // spawnWeb refuses until the cooldown clears it
       web.stoppedReason = `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW/1000}s`;
-      writeStatus('crashed', { reason: 'web crash budget exceeded' });
+      web.pausedUntil = Date.now() + WEB_CRASH_COOLDOWN; // statusRefresh keeps reporting the pause
+      writeStatus('crashed', { reason: 'web crash budget exceeded', nextAttemptIn: WEB_CRASH_COOLDOWN });
       // Do NOT stop the monitor — worker keeps running so PTYs survive.
+      const t = setTimeout(() => {
+        if (stopping) return;
+        web.stoppedForever = false;
+        web.stoppedReason = null;
+        web.pausedUntil = null;
+        web.crashTimestamps = [];
+        web.backoffDelay = BACKOFF_INITIAL;
+        monitorLog('web crash cooldown over — starting web again');
+        spawnWeb();
+      }, WEB_CRASH_COOLDOWN);
+      if (t.unref) t.unref();
       return;
     }
 
@@ -561,7 +579,13 @@ process.on('exit', (code) => {
 
 // --- Periodic status refresh (so uptime stays current) -----------------------
 const statusRefresh = setInterval(() => {
-  if (!stopping) writeStatus('running');
+  if (stopping) return;
+  // #579: a paused web is not "running" - keep announcing the pause and when it ends.
+  if (web.pausedUntil) {
+    writeStatus('crashed', { reason: 'web crash budget exceeded', nextAttemptIn: Math.max(0, web.pausedUntil - Date.now()) });
+    return;
+  }
+  writeStatus('running');
 }, 5000);
 statusRefresh.unref?.();
 

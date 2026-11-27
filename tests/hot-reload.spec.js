@@ -324,6 +324,51 @@ test.describe('Phase 5: monitor.js supervises worker + web independently', () =>
     }
   });
 
+  test('#579 web crash budget is a pause: after the cooldown the monitor starts web again (worker untouched)', async () => {
+    test.slow();
+    const h = await startMonitor({ env: {
+      WT_MONITOR_BACKOFF_INITIAL: '200',
+      WT_MONITOR_BACKOFF_MAX: '200',
+      WT_MONITOR_BACKOFF_MULT: '1',
+      WT_MONITOR_CRASH_BUDGET: '3',
+      WT_MONITOR_WEB_COOLDOWN: '7000',
+    }});
+    try {
+      await h.waitForHealthy(20000);
+      const workerPidBefore = h.readStatus().worker.pid;
+      let lastWebPid = null;
+      for (let i = 0; i < 3; i++) {
+        await h.waitForStatus((x) => x?.web?.pid && isPidAlive(x.web.pid), 15000);
+        lastWebPid = h.readStatus().web.pid;
+        killPid(lastWebPid);
+        await h.waitForStatus((x) => x?.web?.pid !== lastWebPid, 10000).catch(() => {});
+      }
+      // The budget is spent: paused, with the next attempt announced.
+      const paused = await h.waitForStatus((s) => s?.status === 'crashed' && s?.web?.stoppedForever === true, 15000);
+      expect(paused.nextAttemptIn).toBeGreaterThan(0);
+      expect(paused.nextAttemptIn).toBeLessThanOrEqual(7000);
+      // The 5 s status refresh must keep announcing the pause, not overwrite it with "running".
+      await new Promise((r) => setTimeout(r, 5500));
+      const still = h.readStatus();
+      if (still?.web?.stoppedForever === true) {
+        expect(still.status).toBe('crashed');
+        expect(still.nextAttemptIn).toBeLessThan(paused.nextAttemptIn);
+      }
+      // ...and then the monitor tries again on its own: a NEW web, healthy, not paused.
+      const back = await h.waitForStatus((s) => s?.web?.stoppedForever === false && s?.web?.pid && s.web.pid !== lastWebPid && isPidAlive(s.web.pid), 20000);
+      await h.waitForHealthy(20000);
+      expect(back.worker.pid).toBe(workerPidBefore);
+      expect(isPidAlive(workerPidBefore)).toBe(true);
+      // A FRESH budget: one more crash is an ordinary backoff restart, not another pause.
+      killPid(back.web.pid);
+      const again = await h.waitForStatus((s) => s?.web?.pid && s.web.pid !== back.web.pid && isPidAlive(s.web.pid), 10000);
+      expect(again.web.stoppedForever).toBe(false);
+    } finally {
+      await h.stop();
+      rmRf(h.dataDir);
+    }
+  });
+
   test('graceful shutdown (SIGTERM) → both children exit cleanly', async () => {
     const h = await startMonitor();
     try {
