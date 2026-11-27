@@ -36,11 +36,20 @@ test.describe('#579 /api/restart leaves restarting to the monitor', () => {
     expect(code).not.toMatch(/\bfork\s*\(/);
     expect(code).not.toMatch(/pm2/i);
     expect(code).not.toMatch(/detached/);
+    // Any other relaunch: exec/execFile of node, a copy of our own argv, or server.js by name.
+    expect(code).not.toMatch(/process\.argv|execPath|server\.js|\bexec(File)?\s*\(/);
   });
 
-  test('the handler exits 0, which is what monitor.js restarts', () => {
+  test('the handler exits 0 through gracefulShutdown, which is what monitor.js restarts', () => {
     const code = stripComments(restartHandlerSource());
-    expect(code).toMatch(/process\.exit\(\s*0\s*\)/);
+    // The one shutdown path: it flushes the worker and every debounced write first.
+    expect(code).toMatch(/gracefulShutdown\(/);
+    const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
+    const g = src.indexOf('async function gracefulShutdown(');
+    expect(g).toBeGreaterThan(-1);
+    const body = stripComments(src.slice(g, src.indexOf('\n}', g)));
+    expect(body).toMatch(/flushState/);
+    expect(body).toMatch(/process\.exit\(\s*0\s*\)\s*;\s*$/);
     // The other half of the contract: the monitor respawns a clean exit.
     const monitor = fs.readFileSync(path.join(__dirname, '..', 'monitor.js'), 'utf8');
     expect(monitor).toMatch(/if \(code === 0\) \{[\s\S]{0,200}setTimeout\(spawnWeb/);

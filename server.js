@@ -12098,7 +12098,6 @@ app.post('/api/restart', (req, res) => {
   res.json({ ok: true, message: 'Restarting...' });
   console.log(`[${new Date().toISOString()}] Restart requested via API`);
   setTimeout(async () => {
-    try { await workerClient.rpc('flushState'); } catch (e) {}
     const { execSync } = require('child_process');
     // Pull latest code before restarting. Hardened so a broken HTTPS remote
     // credential can't hang git-credential-manager and leak process trees.
@@ -12110,7 +12109,9 @@ app.post('/api/restart', (req, res) => {
     // left an unsupervised orphan holding the worker's one IPC slot, so every web the
     // monitor started was refused, crashed on EPIPE and the monitor gave up for good; the
     // next hot reload killed the orphan and took the whole fleet down (2026-11-26).
-    process.exit(0);
+    // gracefulShutdown flushes the worker and every debounced write, kills the model runs
+    // it recorded, then exits 0 - the one shutdown path, so a restart loses nothing.
+    gracefulShutdown('api-restart');
   }, 500);
 });
 
