@@ -681,7 +681,7 @@ its Now screen). Additive: no existing route or field changes except `checkIn` o
 Effort = { id /*the lead's session id*/, name, server, machines: [name], startedAt, lastActivity,
   state: 'needs-you'|'stuck'|'moving'|'waiting', doing /*newest live headline*/, verdict: Verdict|null,
   sessions: [{server, id, name, status, closed, closedAt, parentId, depth, wait: {on, what}|null, verdict|null}],
-  items: [{key, ref, title, stage, station, waitsOn}], needsYou: [Card], todoCount, partial: bool, missing: [server] }
+  items: [{key, ref, title, stage, station, waitsOn}], needsYou: [Card], todo: [Card], todoCount, partial: bool, missing: [server] }
 Verdict = { kind: 'legit'|'suspect'|'unknown', rule: 'R1'|'R2'|'R3'|'R6'|'R7'|'R9'|'check-in', text, at }
 IdleItem = { key, ref, title, stage, station, cls: 'waits-test'|'not-started'|'stranded'|'finished', updatedAt }
 ```
@@ -690,8 +690,9 @@ IdleItem = { key, ref, title, stage, station, cls: 'waits-test'|'not-started'|'s
 hand-off through `replaces`); items, stage and station are the subjects' (`buildView`, `lib/mc-stage.js`);
 `needsYou` are the cards Answer now SHOWS for the tree's sessions: `GET /api/mc/now` and this route read ONE `mcBuildNow`
 (`lib/mc-needs.js` `buildNow`, then `mcCardFaces`), so the same ids, a question carries its face, and a card held on
-My to-do or put off by Later is in neither; `todoCount` counts the tree's actions (they are on My to-do, never repeated
-under the effort, but they make it `needs-you`); `machines[].slots` is
+My to-do or put off by Later is in neither; `todo` is the tree's actions, the same cards My to-do lists (they make it
+`needs-you`; the home shows them on My to-do only, the effort's page under To do - #584) and `todoCount` their number,
+which an older app reads; `machines[].slots` is
 each server's own `maxSessions` (`GET /api/machine`, cached 30 s, null when unread). The dispatcher is no effort.
 
 **A wait's validity is the supervisor's, never MC's.** `verdict` is READ from the supervisor's state

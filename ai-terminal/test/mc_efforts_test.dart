@@ -534,6 +534,45 @@ void main() {
       await tester.pumpWidget(const SizedBox());
     });
 
+    testWidgets('#584: a to-do the effort owes is on its page, with Done, Not now and its session', (tester) async {
+      final body = _efforts();
+      (body['efforts'] as List)[0]['todo'] = [
+        {
+          'id': 'alpha|s-2|action:1',
+          'kind': 'action',
+          'sessionId': 's-2',
+          'sessionName': 'Session s-2',
+          'server': 'Alpha',
+          'what': 'plug in the board',
+          'action': {'steps': ['Plug in the board', 'Power it on'], 'where': 'the lab'},
+          'why': {'blocks': 1, 'text': 'blocks this session'},
+          'askedAt': _t0,
+        },
+      ];
+      (body['efforts'] as List)[0]['todoCount'] = 1;
+      server.effortsBody = body;
+      await pump(tester, 'e-ask');
+      expect(find.text('To do (1)'), findsOneWidget);
+      final card = find.byKey(const ValueKey('mc-action-alpha|s-2|action:1'));
+      expect(card, findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-step-0'))), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-done'))), findsOneWidget);
+      expect(find.descendant(of: card, matching: find.byKey(const ValueKey('mc-action-later'))), findsOneWidget);
+      await tester.tap(find.descendant(of: card, matching: find.text('Open session')));
+      expect(opened, ['s-2']);
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('an older server (a count, no cards) shows no To do section', (tester) async {
+      final body = _efforts();
+      (body['efforts'] as List)[0]['todoCount'] = 1;
+      server.effortsBody = body;
+      await pump(tester, 'e-ask');
+      expect(find.byKey(const ValueKey('mc-effort-todo-title')), findsNothing);
+      expect(find.text('One thing for you is on My to-do.'), findsOneWidget);
+      await tester.pumpWidget(const SizedBox());
+    });
+
     testWidgets('an effort that is gone says so, never a blank page', (tester) async {
       await pump(tester, 'e-nobody');
       expect(find.byKey(const ValueKey('mc-effort-gone')), findsOneWidget);
