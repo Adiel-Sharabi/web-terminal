@@ -61,8 +61,19 @@ async function withConfig(patch, fn) {
   fs.writeFileSync(CFG_FILE, JSON.stringify({ ...(before ? JSON.parse(before) : {}), ...patch }, null, 2));
   await sleep(LIVE_CONFIG_MS);
   try { await fn(); } finally {
-    if (before === null) fs.unlinkSync(CFG_FILE); else fs.writeFileSync(CFG_FILE, before);
-    await sleep(LIVE_CONFIG_MS);
+    if (before === null) {
+      // The server keeps the config it last read when the file is GONE: unlinking alone would leave THIS spec's config
+      // (a 409 authority, say) live for every spec after it. Overwrite it with an empty one, let the server read that, remove it.
+      fs.writeFileSync(CFG_FILE, '{}');
+      await sleep(LIVE_CONFIG_MS);
+      const ctx = await authCtx();
+      await ctx.get('/api/mc/board');
+      await ctx.dispose();
+      fs.unlinkSync(CFG_FILE);
+    } else {
+      fs.writeFileSync(CFG_FILE, before);
+      await sleep(LIVE_CONFIG_MS);
+    }
   }
 }
 
