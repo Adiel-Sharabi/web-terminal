@@ -295,7 +295,8 @@ test.describe.serial('#467 the supervisor wakes and reaches the owner across two
 // answers) and charlie (nobody listens: its scan fails every time, so `complete` stays false,
 // as Office-Tests did for days on 2026-11-26). Sessions never move between servers, so a session
 // last seen on bravo is judged from bravo's answer alone. The `unknown` side of the rule is
-// proven in tests/supervisor-absence-562.spec.js (a session recorded on the down server).
+// proven in tests/supervisor-absence-562.spec.js (a session recorded on the down server, an id never
+// seen on a complete scan: an e2e here could not tell the never-seen gate from the incomplete scan).
 test.describe.serial('#562 a peer that never answers does not blind the supervisor', () => {
   test.setTimeout(120000);
   const portA = 18300 + Math.floor(Math.random() * 20);
@@ -357,17 +358,6 @@ test.describe.serial('#562 a peer that never answers does not blind the supervis
     expect(after.complete).toBe(false); // still no complete scan: the verdict did not wait for one
     expect(node(after, lead).waitState).toMatchObject({ state: 'resolved' }); // every child done or gone
     expect(supLogIn(dirA).filter((l) => l.event === 'wake' && l.id === lead)).toHaveLength(1);
-    expect((await a.delete(`/api/sessions/${lead}`)).status()).toBe(200);
-  });
-
-  test('R1: a wait on a session this supervisor never saw stays unknown and wakes nobody', async () => {
-    const stranger = crypto.randomUUID();
-    const lead = await turnWith(a, A.base, 'sup-562-stranger-lead', { on: 'external', what: 'a stranger', target: { kind: 'session', id: stranger } });
-    await until(async () => node(await state(), lead)?.waitState, 'a verdict on the wait');
-    await sleep(CONFIRM_MS + 3000); // well past the confirm time
-    const n = node(await state(), lead);
-    expect(n.waitState).toMatchObject({ state: 'unknown' });
-    expect(supLogIn(dirA).some((l) => l.event === 'wake' && l.id === lead)).toBe(false);
     expect((await a.delete(`/api/sessions/${lead}`)).status()).toBe(200);
   });
 
