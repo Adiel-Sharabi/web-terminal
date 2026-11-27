@@ -46,6 +46,45 @@ if (-not $server) {
 }
 
 $msg = "server=$(($server | ForEach-Object { $_.ProcessId }) -join ',') worker=$(($worker | ForEach-Object { $_.ProcessId }) -join ',')"
+
+# --- #579: refuse a reload nothing would recover from -----------------------------------
+# Killing server.js is a reload ONLY because monitor.js respawns it. A server.js whose parent
+# is not a running monitor.js (an orphan - the old /api/restart left one on every machine on
+# 2026-11-26) has nothing to bring it back: the reload that killed those orphans left five
+# peers dark until each was cold-restarted by hand. Refuse, say why, kill nothing.
+$unsupervised = @($server | Where-Object {
+  $ppid = $_.ParentProcessId
+  -not ($procs | Where-Object { $_.ProcessId -eq $ppid -and $_.CommandLine -like '*monitor.js*' })
+})
+if ($unsupervised.Count -gt 0) {
+  $who = ($unsupervised | ForEach-Object { "$($_.ProcessId) (parent $($_.ParentProcessId))" }) -join ', '
+  Note "REFUSED - server.js not supervised by monitor.js: $who; nothing killed"
+  Write-Output "hot reload REFUSED - server.js $who is not a child of a running monitor.js, so nothing would restart it. Nothing killed. Cold-restart this machine (scripts/cold-restart.ps1) instead."
+  exit 3
+}
+
+# --- Preflight: can the respawned server.js load its deps? ------------------------------
+# A running server serves its modules from memory, so a broken node_modules answers 200
+# until the respawn dies on `Cannot find module` (office-tests 2026-08-04). Same gate as
+# cold-restart.ps1; only a real verdict blocks. The trimmed /api/exec environment can carry
+# PATHEXT=.CPL, which stops PowerShell running node.exe at all - repair it for this process.
+if ($env:PATHEXT -notmatch '(?i)\.EXE') { $env:PATHEXT = '.COM;.EXE;.BAT;.CMD;' + $env:PATHEXT }
+$nodeExe = ($server | Select-Object -First 1).ExecutablePath
+if ($nodeExe -and (Test-Path $nodeExe)) {
+  $global:LASTEXITCODE = $null
+  $depOut = (& $nodeExe (Join-Path $repo 'scripts\check-deps.js') 2>&1 | Out-String).Trim()
+  if ($null -eq $LASTEXITCODE) {
+    Note "preflight SKIPPED - could not run check-deps.js: $depOut"
+  } elseif ($LASTEXITCODE -ne 0) {
+    Note "ABORTED - runtime deps not loadable, nothing killed: $depOut"
+    Write-Output 'hot reload ABORTED - runtime deps not loadable, nothing killed:'
+    Write-Output $depOut
+    exit 1
+  } else {
+    Note "preflight: $depOut"
+  }
+}
+
 if ($CheckOnly) {
   Note "check-only: $msg"
   Write-Output "would reload server.js only ($msg)"

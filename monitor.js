@@ -44,6 +44,8 @@ const CRASH_BUDGET_MAX = parseInt(process.env.WT_MONITOR_CRASH_BUDGET) || 5;
 const BACKOFF_INITIAL = parseInt(process.env.WT_MONITOR_BACKOFF_INITIAL) || 2000;
 const BACKOFF_MAX = parseInt(process.env.WT_MONITOR_BACKOFF_MAX) || 30000;
 const BACKOFF_MULTIPLIER = parseFloat(process.env.WT_MONITOR_BACKOFF_MULT) || 2;
+// #579: how long a web that spent its crash budget waits before the monitor tries it again.
+const WEB_CRASH_COOLDOWN = parseInt(process.env.WT_MONITOR_WEB_COOLDOWN) || 5 * 60 * 1000;
 const WORKER_READY_TIMEOUT = 20000;        // wait up to 20s for pipe to accept a connection
 const WORKER_READY_RETRY_MS = 150;
 
@@ -414,11 +416,24 @@ function spawnWeb() {
     web.crashTimestamps = web.crashTimestamps.filter(t => Date.now() - t < CRASH_BUDGET_WINDOW);
 
     if (web.crashTimestamps.length >= CRASH_BUDGET_MAX) {
-      monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — stopping`);
-      web.stoppedForever = true;
+      // #579: a PAUSE, not the end. Stopping for good turned a passing cause (an orphan
+      // server.js holding the worker's one IPC slot) into a box that stayed dark until a
+      // human cold-restarted it. Try again after the cooldown with a fresh budget.
+      monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — pausing, next attempt in ${WEB_CRASH_COOLDOWN/1000}s`);
+      web.stoppedForever = true; // spawnWeb refuses until the cooldown clears it
       web.stoppedReason = `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW/1000}s`;
-      writeStatus('crashed', { reason: 'web crash budget exceeded' });
+      writeStatus('crashed', { reason: 'web crash budget exceeded', nextAttemptIn: WEB_CRASH_COOLDOWN });
       // Do NOT stop the monitor — worker keeps running so PTYs survive.
+      const t = setTimeout(() => {
+        if (stopping) return;
+        web.stoppedForever = false;
+        web.stoppedReason = null;
+        web.crashTimestamps = [];
+        web.backoffDelay = BACKOFF_INITIAL;
+        monitorLog('web crash cooldown over — starting web again');
+        spawnWeb();
+      }, WEB_CRASH_COOLDOWN);
+      if (t.unref) t.unref();
       return;
     }
 
