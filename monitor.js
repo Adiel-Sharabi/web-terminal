@@ -77,6 +77,7 @@ function makeChildState(name, logFile) {
     recentStderr: '',
     stoppedForever: false,     // crash budget exceeded or port-in-use
     stoppedReason: null,
+    pausedUntil: null,         // #579: end of a crash-budget pause (web only)
     // Used to coordinate restarts: when worker crashes, web's exit is an expected
     // consequence, not a crash. This flag suppresses web's crash handling for one exit.
     expectedExit: false,
@@ -422,12 +423,14 @@ function spawnWeb() {
       monitorLog(`web crash budget exceeded (${CRASH_BUDGET_MAX} in ${CRASH_BUDGET_WINDOW/1000}s) — pausing, next attempt in ${WEB_CRASH_COOLDOWN/1000}s`);
       web.stoppedForever = true; // spawnWeb refuses until the cooldown clears it
       web.stoppedReason = `${CRASH_BUDGET_MAX} crashes in ${CRASH_BUDGET_WINDOW/1000}s`;
+      web.pausedUntil = Date.now() + WEB_CRASH_COOLDOWN; // statusRefresh keeps reporting the pause
       writeStatus('crashed', { reason: 'web crash budget exceeded', nextAttemptIn: WEB_CRASH_COOLDOWN });
       // Do NOT stop the monitor — worker keeps running so PTYs survive.
       const t = setTimeout(() => {
         if (stopping) return;
         web.stoppedForever = false;
         web.stoppedReason = null;
+        web.pausedUntil = null;
         web.crashTimestamps = [];
         web.backoffDelay = BACKOFF_INITIAL;
         monitorLog('web crash cooldown over — starting web again');
@@ -576,7 +579,13 @@ process.on('exit', (code) => {
 
 // --- Periodic status refresh (so uptime stays current) -----------------------
 const statusRefresh = setInterval(() => {
-  if (!stopping) writeStatus('running');
+  if (stopping) return;
+  // #579: a paused web is not "running" - keep announcing the pause and when it ends.
+  if (web.pausedUntil) {
+    writeStatus('crashed', { reason: 'web crash budget exceeded', nextAttemptIn: Math.max(0, web.pausedUntil - Date.now()) });
+    return;
+  }
+  writeStatus('running');
 }, 5000);
 statusRefresh.unref?.();
 

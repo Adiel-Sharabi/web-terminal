@@ -83,6 +83,8 @@ if ($nodeExe -and (Test-Path $nodeExe)) {
   } else {
     Note "preflight: $depOut"
   }
+} else {
+  Note 'preflight SKIPPED - could not read the running node.exe path'
 }
 
 if ($CheckOnly) {

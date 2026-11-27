@@ -29,7 +29,11 @@ function alive(pid) { try { process.kill(pid, 0); return true; } catch (e) { ret
 /** Spawn `node -e <code> <args...>` and read the first line it prints. */
 function spawnNode(code, args) {
   const p = spawn(process.execPath, ['-e', code, ...args], { stdio: ['ignore', 'pipe', 'ignore'], windowsHide: true });
-  const first = new Promise((resolve) => {
+  const first = new Promise((resolve, reject) => {
+    // Never hang: a stand-in left running names this checkout's server.js and would make
+    // a later run's positive control read REFUSED.
+    const t = setTimeout(() => { try { p.kill(); } catch {} reject(new Error('stand-in printed no pid')); }, 10000);
+    p.once('exit', () => clearTimeout(t));
     let buf = '';
     p.stdout.on('data', (d) => { buf += d; const i = buf.indexOf('\n'); if (i >= 0) resolve(buf.slice(0, i).trim()); });
   });
@@ -45,6 +49,21 @@ setInterval(() => {}, 1000);`;
 
 test.describe('#579 hot-reload.ps1 refuses an unsupervised server.js', () => {
   test.skip(process.platform !== 'win32', 'PowerShell deploy script');
+
+  test('the deps gate aborts before the first Stop-Process', () => {
+    // Same ordering pin as cold-restart.ps1's (check-deps.spec.js): a gate after the kill is worthless.
+    const src = require('fs').readFileSync(SCRIPT, 'utf8').split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+    const guard = src.indexOf('hot reload REFUSED');
+    const check = src.indexOf('check-deps.js');
+    const abort = src.indexOf('ABORTED - runtime deps not loadable');
+    const checkOnly = src.indexOf('if ($CheckOnly)');
+    const kill = src.indexOf('Stop-Process');
+    expect(guard).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(guard);
+    expect(abort).toBeGreaterThan(check);
+    expect(checkOnly).toBeGreaterThan(abort);
+    expect(kill).toBeGreaterThan(checkOnly);
+  });
 
   test('a server.js whose parent is not monitor.js is REFUSED and left running', async () => {
     const { p, first } = spawnNode(IDLE, [SERVER_ARG]);
