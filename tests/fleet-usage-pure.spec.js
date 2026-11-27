@@ -410,6 +410,70 @@ test.describe('what a record may hold', () => {
     expect(first.gates).toMatchObject({ pass: 0, fail: 1 });
     expect(first.key).not.toBe(second.key);
   });
+  test('a state entry with no dates: the run is dated from its own events (worker .. outcome)', () => {
+    const events = [
+      ev({ at: '2026-11-27T08:00:00Z', kind: 'worker', wtId: 'w1', model: 'sonnet' }),
+      ev({ at: '2026-11-27T08:10:00Z', kind: 'phase', phase: 'fix' }),
+      ev({ at: '2026-11-27T08:50:00Z', kind: 'outcome', outcome: 'waiting-adiel' }),
+    ];
+    const r = bh.buildBhItem({ origin: 'Home', run: 'run', item: 7, st: { outcome: 'waiting-adiel' }, events });
+    expect(r.startedAt).toBe('2026-11-27T08:00:00.000Z');
+    expect(r.finishedAt).toBe('2026-11-27T08:50:00.000Z');
+    expect(r.hasEvents).toBe(true);
+    expect(r.outcome).toBe('waiting-adiel');
+    expect(r.workers).toEqual(['w1']);
+    expect(r.models).toEqual(['sonnet']);
+    expect(r.phases.length).toBeGreaterThan(0);
+    expect(r.key).toContain('2026-11-27T08:00:00.000Z');
+  });
+  test('a state entry with no dates and two runs in the events: only the LATEST run counts', () => {
+    const events = [
+      ev({ at: '2026-11-20T08:00:00Z', kind: 'worker', wtId: 'w1' }),
+      ev({ at: '2026-11-20T09:00:00Z', kind: 'outcome', outcome: 'fixed-pushed' }),
+      ev({ at: '2026-11-27T08:00:00Z', kind: 'worker', wtId: 'w2' }),
+      ev({ at: '2026-11-27T08:05:00Z', kind: 'phase', phase: 'fix' }),
+      ev({ at: '2026-11-27T08:30:00Z', kind: 'outcome', outcome: 'waiting-adiel' }),
+    ];
+    const r = bh.buildBhItem({ origin: 'Home', run: 'run', item: 7, st: {}, events });
+    expect(r.outcome).toBe('waiting-adiel');
+    expect(r.workers).toEqual(['w2']);
+    expect(r.startedAt).toBe('2026-11-27T08:00:00.000Z');
+    expect(r.finishedAt).toBe('2026-11-27T08:30:00.000Z');
+  });
+  test('a lost outcome then a retry worker is ONE run, not two', () => {
+    const events = [
+      ev({ at: '2026-11-27T08:00:00Z', kind: 'worker', wtId: 'w1' }),
+      ev({ at: '2026-11-27T08:20:00Z', kind: 'outcome', outcome: 'lost' }),
+      ev({ at: '2026-11-27T08:30:00Z', kind: 'worker', wtId: 'w2' }),
+      ev({ at: '2026-11-27T09:00:00Z', kind: 'outcome', outcome: 'fixed-pushed' }),
+    ];
+    const r = bh.buildBhItem({ origin: 'Home', run: 'run', item: 7, st: {}, events });
+    expect(r.startedAt).toBe('2026-11-27T08:00:00.000Z');
+    expect(r.finishedAt).toBe('2026-11-27T09:00:00.000Z');
+    expect(r.workers).toEqual(['w1', 'w2']);
+    expect(r.outcome).toBe('fixed-pushed');
+  });
+  test('a state entry WITH dates keeps its own dates and the slack window, whatever the events say', () => {
+    const events = [
+      ev({ at: '2026-11-20T08:00:00Z', kind: 'worker', wtId: 'w1' }),
+      ev({ at: '2026-11-27T08:00:00Z', kind: 'worker', wtId: 'w2' }),
+    ];
+    const r = bh.buildBhItem({ origin: 'Home', run: 'run', item: 7, st: { startedAt: '2026-11-20T07:58:00Z', finishedAt: '2026-11-20T10:00:00Z', outcome: 'fixed' }, events });
+    expect(r.startedAt).toBe('2026-11-20T07:58:00.000Z');
+    expect(r.finishedAt).toBe('2026-11-20T10:00:00.000Z');
+    expect(r.workers).toEqual(['w1']);
+  });
+  test('the report lists a dateless-state item from its events inside a window holding its outcome day', () => {
+    const now = Date.parse('2026-11-27T12:00:00');
+    const events = [
+      ev({ at: new Date(now - 3 * 36e5).toISOString(), kind: 'worker', wtId: 'w1' }),
+      ev({ at: new Date(now - 2 * 36e5).toISOString(), kind: 'outcome', outcome: 'waiting-adiel' }),
+    ];
+    const rec = { ...bh.buildBhItem({ origin: 'Home', run: 'run', item: 7, st: {}, events }), seq: 1, at: new Date(now).toISOString() };
+    const r = buildReport([rec], { now, days: 1 });
+    expect(r.bugHunter.items).toBe(1);
+    expect(r.bugHunter.list.map((x) => x.item)).toEqual([7]);
+  });
   test('a session record carries no folder path', () => {
     const rec = col.buildSessionRecord({ origin: 'Home', sid: 's1', summary: { start: 'a', end: 'b', cwd: '/home/example/secret-project', project: 'secret-project', tok: {}, units: 1, models: {}, sub: {}, prompts: {}, wakes: {}, time: {}, compactions: 0, quality: {}, peakCtx: 0, byDay: {}, facts: { firstClass: 'interactive' } }, entry: null });
     expect(JSON.stringify(rec)).not.toContain('/home/example');
