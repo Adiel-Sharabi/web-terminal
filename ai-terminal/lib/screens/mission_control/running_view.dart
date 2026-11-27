@@ -396,7 +396,8 @@ class _McNotRunningState extends State<McNotRunning> {
   }
 }
 
-/// An effort's page: its card, what waits on the person, its work items (each opens the item's page)
+/// An effort's page: its card, what waits on the person (the cards to answer, then the to-dos to do -
+/// #584: a page that says it needs the person shows what for), its work items (each opens the item's page)
 /// and its session tree (each live session opens). It reads the feed, so it follows the effort live;
 /// an effort that has ended says so.
 class McEffortScreen extends StatelessWidget {
@@ -455,6 +456,15 @@ class McEffortScreen extends StatelessWidget {
             const SizedBox(height: 16),
             mcSectionTitle(context, 'Waiting on you (${e.needsYou.length})', key: const ValueKey('mc-effort-waits-title')),
             for (final c in e.needsYou)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: mcWaitCard(context, feed, c, onAnswer: onAnswer, onOpenSession: onOpenSession, now: now),
+              ),
+          ],
+          if (e.todo.isNotEmpty) ...[
+            const SizedBox(height: 16),
+            mcSectionTitle(context, 'To do (${e.todo.length})', key: const ValueKey('mc-effort-todo-title'), hint: 'also on My to-do'),
+            for (final c in e.todo)
               Padding(
                 padding: const EdgeInsets.only(bottom: 8),
                 child: mcWaitCard(context, feed, c, onAnswer: onAnswer, onOpenSession: onOpenSession, now: now),

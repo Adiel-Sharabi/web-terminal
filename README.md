@@ -943,7 +943,7 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   machines, what it is doing now, the supervisor's verdict on its wait (`legit: ...`, `suspect: ...`, or
   `unknown`, which the supervisor decides and Mission Control only shows; a suspect wait makes the effort
   *stuck*), a strip of its work items (an Azure DevOps item shows its station) and, when a card waits for
-  you, Answer right there; tap it for its page (items, the session tree, what waits on you). One chip per
+  you, Answer right there; tap it for its page (items, the session tree, what waits on you: the cards to answer and its to-dos, with Done). One chip per
   machine in the header says how full it is (`Home 4/10`). **My to-do** stays above. Below, folded, **Not
   running (N)** lists the work nobody runs grouped by line (waits for test, not started, stranded,
   finished), each with Start work; tap a line for its page. A machine that did not answer is said, and an
