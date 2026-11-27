@@ -1,0 +1,179 @@
+{
+  "columns": [
+    {
+      "id": "in-progress",
+      "count": 3,
+      "more": 0,
+      "cards": [
+        {
+          "key": "ado:9201",
+          "ref": "#9201",
+          "title": "Decoder drops the first frame",
+          "url": "https://dev.azure.com/fakeorg/Contoso/_workitems/edit/9201",
+          "source": { "kind": "ado", "name": "Contoso" },
+          "project": "Widgets",
+          "station": "In Progress",
+          "stage": "fixing",
+          "since": 1767050280000,
+          "live": true,
+          "badge": { "kind": "you", "text": "waiting on you: Which fix should ship?", "rule": null, "at": 1767223080000 },
+          "sessions": [{ "server": "Alpha", "id": "s-9201", "name": "Fix decoder", "status": "idle" }],
+          "line": { "id": "l-dec", "name": "Decoder" }
+        },
+        {
+          "key": "acme/widgets#42",
+          "ref": "acme/widgets#42",
+          "title": "Login loops forever",
+          "url": "https://github.com/acme/widgets/issues/42",
+          "source": { "kind": "github", "name": "acme/widgets" },
+          "project": "Widgets",
+          "station": null,
+          "stage": "fixing",
+          "since": 1767136680000,
+          "live": true,
+          "badge": { "kind": "suspect", "text": "its wait was answered; nobody told it", "rule": "R1", "at": 1767223080000 },
+          "sessions": [
+            { "server": "Alpha", "id": "s-42a", "name": "Login fix", "status": "idle" },
+            { "server": "Beta", "id": "s-42b", "name": "Login tests", "status": "working" }
+          ],
+          "line": null
+        },
+        {
+          "key": "ado:9202",
+          "ref": "#9202",
+          "title": "Nobody is on this one",
+          "url": null,
+          "source": { "kind": "ado", "name": "Contoso" },
+          "project": null,
+          "station": "In Progress",
+          "stage": null,
+          "since": null,
+          "live": false,
+          "badge": { "kind": "none", "text": "", "rule": null, "at": null },
+          "sessions": [],
+          "line": null
+        }
+      ]
+    },
+    {
+      "id": "pr-review",
+      "count": 1,
+      "more": 0,
+      "cards": [
+        {
+          "key": "acme/widgets#50",
+          "ref": "acme/widgets#50",
+          "title": "Cache the manifest",
+          "url": "https://github.com/acme/widgets/issues/50",
+          "source": { "kind": "github", "name": "acme/widgets" },
+          "project": "Widgets",
+          "station": null,
+          "stage": "pr-open",
+          "since": 1767200000000,
+          "live": true,
+          "badge": { "kind": "legit", "text": "waiting for CI", "rule": "R1", "at": 1767223080000 },
+          "sessions": [{ "server": "Alpha", "id": "s-50", "name": "Manifest cache", "status": "idle" }],
+          "line": null
+        }
+      ]
+    },
+    { "id": "committed-merged", "count": 0, "more": 0, "cards": [] },
+    {
+      "id": "ready-for-test",
+      "count": 1,
+      "more": 0,
+      "cards": [
+        {
+          "key": "ado:9100",
+          "ref": "#9100",
+          "title": "Export drops rows",
+          "url": null,
+          "source": { "kind": "ado", "name": "Contoso" },
+          "project": "Widgets",
+          "station": "Ready for test",
+          "stage": "merged",
+          "since": 1766790280000,
+          "live": false,
+          "badge": { "kind": "none", "text": "", "rule": null, "at": null },
+          "sessions": [],
+          "line": null
+        }
+      ]
+    }
+  ],
+  "candidates": [
+    {
+      "source": { "id": "github:acme/own", "kind": "github", "name": "acme/own", "project": null, "own": true, "dispatcher": false, "run": null },
+      "state": "ok",
+      "why": null,
+      "fetchedAt": 1767222780000,
+      "total": 2,
+      "more": false,
+      "hidden": 0,
+      "cards": [
+        {
+          "key": "acme/own#1",
+          "ref": "acme/own#1",
+          "title": "Add a dark mode",
+          "url": "https://github.com/acme/own/issues/1",
+          "source": { "kind": "github", "name": "acme/own" },
+          "project": null,
+          "station": "open",
+          "stage": null,
+          "since": 1766963880000,
+          "live": false,
+          "badge": { "kind": "none", "text": "", "rule": null, "at": null },
+          "sessions": [],
+          "line": null,
+          "type": null,
+          "priority": 1,
+          "severity": null,
+          "handsOff": false
+        }
+      ]
+    },
+    {
+      "source": { "id": "ado:contoso", "kind": "ado", "name": "Contoso", "project": { "id": "w", "name": "Widgets" }, "own": false, "dispatcher": false, "run": null },
+      "state": "stale",
+      "why": "Azure DevOps answered HTTP 503",
+      "fetchedAt": 1767222000000,
+      "total": 1,
+      "more": true,
+      "hidden": 2,
+      "cards": [
+        {
+          "key": "ado:9301",
+          "ref": "#9301",
+          "title": "Approved bug 9301",
+          "url": "https://dev.azure.com/fakeorg/Contoso/_workitems/edit/9301",
+          "source": { "kind": "ado", "name": "Contoso" },
+          "project": "Widgets",
+          "station": "Approved",
+          "stage": null,
+          "since": 1767136680000,
+          "live": false,
+          "badge": { "kind": "none", "text": "", "rule": null, "at": null },
+          "sessions": [],
+          "line": null,
+          "type": "Bug",
+          "priority": 2,
+          "severity": 3,
+          "handsOff": false
+        }
+      ]
+    },
+    {
+      "source": { "id": "bug-hunter", "kind": "bug-hunter", "name": "Bug hunter", "project": null, "own": false, "dispatcher": true, "run": null },
+      "state": "not-wired",
+      "why": "Bug hunter: its queue is not readable from this server (no run folder found).",
+      "fetchedAt": null,
+      "total": 0,
+      "more": false,
+      "hidden": 0,
+      "cards": []
+    }
+  ],
+  "complete": false,
+  "generatedAt": 1767223080000,
+  "refreshedAt": 1767222780000
+}

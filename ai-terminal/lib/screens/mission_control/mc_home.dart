@@ -24,6 +24,7 @@ import '../../services/mc_analyst.dart';
 import '../../services/mc_card_context.dart';
 import '../../api/models.dart';
 import '../../services/app_config.dart';
+import '../../services/mc_board_feed.dart';
 import '../../services/mc_feed.dart';
 import '../../services/mc_pick_sender.dart';
 import '../../services/needs_you_actions.dart';
@@ -38,6 +39,7 @@ import '../work_board_screen.dart';
 import 'answer_sheet.dart';
 import 'ask_reply_dialog.dart';
 import 'ask_view.dart';
+import 'board_view.dart';
 import 'card_context_sheet.dart' show McCardContextPort;
 import 'machines_view.dart';
 import 'now_view.dart';
@@ -49,6 +51,7 @@ import 'start_work_sheet.dart';
 /// Every place Mission Control can show. Desktop shows [desktopTabs], a phone [phoneTabs].
 enum McTab {
   now('Now', Icons.bolt_outlined, Icons.bolt),
+  board('Board', Icons.view_kanban_outlined, Icons.view_kanban),
   projects('Lines', Icons.account_tree_outlined, Icons.account_tree),
   sessions('Sessions', Icons.view_list_outlined, Icons.view_list),
   ask('Ask', Icons.forum_outlined, Icons.forum),
@@ -61,8 +64,8 @@ enum McTab {
 
   // No Lines tab (owner, 2026-11-26): the home is what runs. [projects] is still a place - a
   // line or project tapped on Now opens there, over Now, and Back returns to Now.
-  static const List<McTab> desktopTabs = [now, sessions, machines];
-  static const List<McTab> phoneTabs = [now, ask, machines];
+  static const List<McTab> desktopTabs = [now, board, sessions, machines];
+  static const List<McTab> phoneTabs = [now, board, ask, machines];
 }
 
 class MissionControlHome extends StatefulWidget {
@@ -123,6 +126,19 @@ class _MissionControlHomeState extends State<MissionControlHome> {
 
   late final McFeed _feed = widget.feed ??
       McFeed(servers: _servers, client: _client, isForeground: () => _repo.isForeground);
+
+  // #567 - the work board's feed (read-only): polled only while the Board tab shows.
+  // Made on first use (the Board tab), never by dispose: a feed it listens to may be gone by then.
+  McBoardFeed? _boardFeed;
+  McBoardFeed get _board => _boardFeed ??= McBoardFeed(feed: _feed, client: _client, isForeground: () => _repo.isForeground);
+
+  /// Where Back from an item's page opened on the Board returns to (else Now).
+  McTab _exitTo = McTab.now;
+
+  void _openBoardSubject(String key) {
+    _exitTo = McTab.board;
+    _openSubject(key);
+  }
 
   late final McAnalyst _analyst =
       widget.analyst ?? McAnalyst(servers: _servers, client: _client, preferred: () => _feed.servedBy);
@@ -240,6 +256,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
   void dispose() {
     widget.active?.removeListener(_onActive);
     _feed.active = false;
+    _boardFeed?.dispose();
     if (widget.feed == null) _feed.dispose();
     _ask.dispose();
     _unconfirmed?.cancel();
@@ -293,7 +310,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _projects.currentState?.openEffort(e.id));
   }
 
-  Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines)
+  Widget _body(McTab tab) => !_isActive && (tab == McTab.sessions || tab == McTab.machines || tab == McTab.board)
       ? const SizedBox.shrink()
       : switch (tab) {
         // #561 - the Running home when the authority sends efforts; an older one keeps the Now screen.
@@ -324,7 +341,10 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             active: _isActive,
             // Late by a frame: only while that page is still what shows (a rail tap may have moved on).
             onExit: () {
-              if (mounted && _tab == McTab.projects) setState(() => _tab = McTab.now);
+              if (mounted && _tab == McTab.projects) {
+                setState(() => _tab = _exitTo);
+                _exitTo = McTab.now;
+              }
             },
           ),
         McTab.sessions => (widget.sessionsBoardBuilder ??
@@ -333,6 +353,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
                   onOpenSession: open,
                   onOpenInbox: () => pushInbox(Navigator.of(context)),
                 ))((s) => _openSession(s.id, initial: s)),
+        McTab.board => McBoardView(feed: _board, onOpenSession: _openSession, onOpenSubject: _openBoardSubject),
         McTab.ask => KeyedSubtree(key: const ValueKey('mc-ask-tab'), child: _askView()),
         McTab.machines => McMachinesView(
             servers: _servers,
@@ -388,6 +409,13 @@ class _MissionControlHomeState extends State<MissionControlHome> {
             icon: const Icon(Icons.play_circle_outline),
             onPressed: _startWork,
           ),
+        if (_tab == McTab.board)
+          IconButton(
+            key: const ValueKey('mc-board-refresh'),
+            tooltip: 'Refresh (reads the trackers again)',
+            icon: const Icon(Icons.refresh),
+            onPressed: () => _board.refresh(candidates: true, force: true),
+          ),
         if (_tab == McTab.now)
           IconButton(
             key: const ValueKey('mc-refresh'),
@@ -428,7 +456,7 @@ class _MissionControlHomeState extends State<MissionControlHome> {
       // choice is kept, so turning back shows it again.
       // A line or project opened from Now shows over Now, which stays lit in the bar.
       final shown = _tab == McTab.projects || tabs.contains(_tab) ? _tab : McTab.now;
-      final index = tabs.indexOf(shown == McTab.projects ? McTab.now : shown);
+      final index = tabs.indexOf(shown == McTab.projects ? _exitTo : shown);
       // The Sessions board and the Projects navigator bring their own bars.
       final body = shown == McTab.sessions || shown == McTab.projects
           ? _body(shown)
@@ -465,7 +493,10 @@ class _MissionControlHomeState extends State<MissionControlHome> {
                   onPressed: widget.onShowSessionsHome,
                 ),
               ]),
-              onDestinationSelected: (i) => setState(() => _tab = tabs[i]),
+              onDestinationSelected: (i) => setState(() {
+                _exitTo = McTab.now;
+                _tab = tabs[i];
+              }),
               destinations: [
                 for (final t in tabs)
                   NavigationRailDestination(
@@ -487,7 +518,10 @@ class _MissionControlHomeState extends State<MissionControlHome> {
         bottomNavigationBar: NavigationBar(
           key: const ValueKey('mc-bottom-bar'),
           selectedIndex: index,
-          onDestinationSelected: (i) => setState(() => _tab = tabs[i]),
+          onDestinationSelected: (i) => setState(() {
+            _exitTo = McTab.now;
+            _tab = tabs[i];
+          }),
           destinations: [
             for (final t in tabs)
               NavigationDestination(

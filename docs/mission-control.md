@@ -733,3 +733,95 @@ order, `state`, `verdict` and `cls`. The one thing it computes is a set differen
 shown above the efforts as "Also waiting on you", so a wait on the person never disappears from the home. Known
 limit: unlike Answer now (#550), the home does not hold its order still while a person reaches for a card; the efforts
 re-sort at each 10 s poll.
+
+## Work board (#567, step 1: read-only) - `lib/mc-board.js`, `GET /api/mc/board`
+
+Current work in columns plus the next candidates per source: **Candidates | In progress | PR / in review | Committed / merged |
+Ready for test**. Authority only (`mcRefusal`), behind auth; capability `mc-board` on `/api/version` (an older authority 404s
+it: the companion then says the server has no board yet). Additive: no existing route changes. `?refresh=1` re-reads the
+candidate sources (any other `refresh` value is a 400).
+**Not in step 1** (the issue's step 2): the Queued column, Start buttons, any write, auto-start. Nothing here writes
+anywhere - not to a tracker, not to Mission Control's state.
+
+```
+{ columns: [{id: 'in-progress'|'pr-review'|'committed-merged'|'ready-for-test', count, more, cards: [Card]}],
+  candidates: [{source: Source, state: 'ok'|'stale'|'loading'|'error'|'not-wired', why, fetchedAt, total, more, hidden, cards: [Card]}],
+  complete: bool, generatedAt, refreshedAt }
+Source = {id, kind: 'github'|'ado'|'bug-hunter', name, project: {id, name}|null, own, dispatcher}
+Card = {key, ref, title, url, source: {kind: 'ado'|'github'|'other', name}, project /*name*/, station /*ADO state, or the tracker state of a candidate*/,
+  stage, since /*when it entered its column, ms, or null*/, live /*a session is on it*/,
+  badge: {kind: 'you'|'suspect'|'unknown'|'legit'|'none', text, rule, at}, sessions: [{server, id, name, status}], line: {id, name}|null,
+  + on a candidate: type, priority, severity, handsOff}
+```
+
+**Which column** = `columnOf` in `lib/mc-board.js`, a MAPPING over evidence others own - it adds no stage rule. Furthest evidence wins:
+finished work (tracker closed, ADO Done, stage tested, every session said done: `idleClassOf`) is off the board; ADO station
+Ready for test -> Ready for test, Committed -> Committed / merged (the station is the authority, as `lib/mc-stage.js` reads it);
+else the stage: merged (an ADO Merged item's too) -> Committed / merged, pr-open / in-review -> PR / in review (an ADO Parked item
+included: held on a feature branch); else a live session on it, or work begun with nobody on it (`idleClassOf` = stranded: ADO In
+Progress, a stage triage..fixing, a session reported) -> In progress (`live: false` says nobody is on it). A start binding no
+session ever reported on is no card: its tracker lists it as a candidate. The column's cards are ordered by what needs the person
+(you, suspect, unknown, legit, none), then the oldest in the column; at most 100 per column (`more` says how many were left out).
+
+**The wait badge is the efforts view's, never worked out here.** The board and `GET /api/mc/efforts` share ONE compute
+(`mcEffortsFor`: one tree, one verdict set). `you` = a card that owes the person an answer on THIS item (`owesAnswer` in
+`lib/mc-efforts.js`, the rule the effort's state uses: a possible-ask or a maybe-answered card is not one); otherwise the
+supervisor's verdict on the item's live sessions: the oldest `suspect`, else `legit` (a valid wait), else `unknown`; else
+`none` (also for an item with no live session, and everywhere the supervisor is off or this is not the lease authority).
+`complete: false` (a server did not answer) is passed through: a card that shows no session may have one there.
+
+**Age in the column** (`since`) follows what decided the column. Where the ADO **station** did (Ready for test; Committed) it is the
+work item's own state change (Meta `stateAt`, `Microsoft.VSTS.Common.StateChangeDate`), then the reported step, then the first time
+the tracker was seen to prove the stage. Where the **stage** did (In progress, PR / in review, a merged PR) the station's change
+time says nothing about it - an item In Progress for a month whose PR opened yesterday is a day old in PR / in review - so: the time
+a session reported the stage, then the first time the tracker was seen to prove it. A close time is never an age (a closed item is
+off the board). A candidate: when it was filed (the bug hunter's: when it was queued). Unknown is `null` (the companion shows no age),
+never a guess.
+
+**Candidates** - a cheap tracker query, no model, per source, the next `mc.board.perSource` (10):
+- the server's own GitHub repo (from its checkout's `origin`) and `mc.board.repos`: open issues (pull requests dropped);
+- each configured project (`projects[]`): `match.repos` open issues; `match.adoProjects` a WIQL query for the states
+  `mc.board.adoStates` (default Approved + Reopen: AM8's "go decision" and "QA sent it back") and types `mc.board.adoTypes`
+  (Bug, Product Backlog Item, Task), tracker-ordered by priority, severity, oldest;
+- the **bug hunter** (ONE source): its own dispatcher's queue, READ - `run.json` `queue` in its run folder (`lib/mc-bughunter.js`;
+  every folder in `mc.board.bugHunter.runDirs`, plus the NEWEST run under `mc.board.bugHunter.roots`, default `C:\temp\bh-orch` on
+  Windows - an orchestrator leaves one dated folder per run, and the older ones are history), in the dispatcher's order with the newest
+  run first (an item queued in two runs is listed once, as the newest has it), hands-off entries marked; titles come from the item
+  reader (the first 20 entries; every entry is still claimed). A folder this server cannot read (the orchestrator runs elsewhere,
+  nothing configured) is **not wired yet** with why - never a guess. The folders are found and read with ASYNC `fs.promises`, inside
+  the source's own cached read: an offline share stalls that one read (a poll waits at most the cold wait), never the server.
+Ranking of a tracker list: priority, then severity, then oldest; ties keep the tracker's order; a dispatcher's list is never
+re-ranked. **An item appears once:** one with a card in a column or a live session is not a candidate (`hidden` counts them out),
+and the bug hunter's queue claims its items from the tracker lists (its dispatcher owns them).
+A GitHub repo with more than 100 open issues lists the OLDEST 100 (`more: true` says so; the tracker's order, not a ranking of the rest).
+All of it goes through the SAME tracker client as a work item's details (`lib/tracker-meta.js`: one fetcher, one GitHub token, one
+ADO PAT and org - the list readers `listGithubIssues` / `listAdoWorkItems`; `fetchJson` gained an optional POST for WIQL). A project
+or state name goes into WIQL only if it is plain (`WIQL_NAME_RE`: no quote or bracket), and run folders come from the server's
+config, never a request.
+
+**Refresh** (`lib/mc-candidates.js`): one in-memory entry per source, fresh for `mc.board.refreshMin` minutes (default 10; the
+bug hunter's 1), then served stale while ONE read runs behind it; `?refresh=1` re-reads now, at most once per 20 s per source, and the REPLY carries
+what it read (it waits for the read, at most the same 3 s - a slower source answers on the next poll); a
+failed read keeps the last list (`state: 'stale'`, `why` in the tracker's words) and is not retried for a minute; a source that
+has never answered is `loading` (a poll waits at most 3 s for it) or `error`; a read that finds nothing to read answers
+`not-wired` (kept for the refresh time). `refreshedAt` is the latest successful read.
+
+Tests: `tests/mc-board.spec.js` (the columns, the badge, the age, the order, the candidates' exclusions and ranking),
+`tests/mc-candidates.spec.js` (config, sources, the cache, the run folder), `tests/mc-tracker-meta.spec.js` (the list readers,
+`stateAt`), `tests/mc-board-routes.spec.js` (the real server against a fake tracker, the source gate). Each gate was mutated once.
+
+### The companion's Board tab (#567)
+
+`ai-terminal/lib/screens/mission_control/board_view.dart` renders this answer; `McBoardFeed`
+(`lib/services/mc_board_feed.dart`) reads it from the server that answered Now (`McFeed.servedBy`, the authority)
+every 30 s while the tab is on screen, and the Refresh button (and a pull on a list) asks for `?refresh=1`.
+The tab is **Board**, beside Now: in the desktop side nav (Now, Board, Sessions, Machines) and the phone's bottom bar
+(Now, Board, Ask, Machines). Desktop: five columns side by side (sideways scroll under 270 px each); phone: one swipeable
+page per column, its count on the tab. A card shows the ref and title, then chips: source (`Contoso · ADO`, or the repo), project, state
+(the ADO station, else the stage), the age (`2 d in column`; a candidate `3 d old`; nothing when the server does not know it) and the wait
+badge (`on you`, `valid wait`, `suspect wait`; none shows none), and who is on it. A tap opens the card's live session, else
+the item's page over the home (Back returns to the Board); a candidate opens a sheet with its type, priority, state and an **Open in
+tracker** link (http/https only). A server that answers 404 shows "This server has no board yet" and is not asked again for 5 minutes
+(the window belongs to that server: a different authority is asked at once; Refresh always asks, also when it was queued behind a read);
+Mission Control's feed finding its server asks for a board at most once per poll interval; a failed read keeps the last board with a note saying why it is old; another server's board is never kept.
+`complete: false` is said ("a machine did not answer"). Tests: `ai-terminal/test/mc_board_test.dart`.

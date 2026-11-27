@@ -1673,3 +1673,260 @@ class McEfforts {
     return null;
   }
 }
+
+// --- #567 - the work board (`GET /api/mc/board`) ----------------------------------------------------
+//
+// Current work in columns, and the next candidates per source. The server owns every rule (which column
+// a work item is in, the wait badge - the supervisor's verdict, never worked out here - the candidates'
+// order and what they exclude: `lib/mc-board.js`); a column, badge kind or source state this app does not
+// know is kept as sent and shown as its own words.
+
+/// The wait badge of a card: `you`, `suspect`, `unknown`, `legit` or `none`, with the supervisor's words.
+class McBadge {
+  final String kind;
+  final String? text;
+  final String? rule;
+  const McBadge({this.kind = 'none', this.text, this.rule});
+
+  static McBadge fromJson(dynamic json) {
+    final m = _map(json);
+    return McBadge(kind: _str(m['kind']) ?? 'none', text: _str(m['text']), rule: _str(m['rule']));
+  }
+
+  bool get isNone => kind == 'none';
+  bool get isYou => kind == 'you';
+  bool get isSuspect => kind == 'suspect';
+
+  /// What the badge says: "on you", "valid wait", "suspect wait", "unknown wait" (a newer kind: as sent).
+  String get label => switch (kind) {
+        'you' => 'on you',
+        'legit' => 'valid wait',
+        'suspect' => 'suspect wait',
+        'unknown' => 'unknown wait',
+        'none' => '',
+        _ => kind,
+      };
+}
+
+/// One session working on a card's item.
+class McBoardSession {
+  final String id;
+  final String? server;
+  final String? name;
+  final String? status;
+  const McBoardSession({required this.id, this.server, this.name, this.status});
+
+  static McBoardSession? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    return id == null ? null : McBoardSession(id: id, server: _str(m['server']), name: _str(m['name']), status: _str(m['status']));
+  }
+}
+
+/// One card of the board: a work item in a column, or a candidate.
+class McBoardCard {
+  final String key;
+  final String? ref;
+  final String? title;
+  final String? url;
+
+  /// The tracker it lives in: `ado`, `github` or `other`, and its name (the ADO project or the repo).
+  final String? sourceKind;
+  final String? sourceName;
+  final String? project;
+
+  /// An Azure DevOps state (or, on a candidate, the tracker's own); null for a GitHub item.
+  final String? station;
+  final String? stage;
+
+  /// When it entered its column (a candidate: when it was filed or queued); null: not known.
+  final DateTime? since;
+  final bool live;
+  final McBadge badge;
+  final List<McBoardSession> sessions;
+  final McLineRef? line;
+
+  /// Candidates only.
+  final String? type;
+  final int? priority;
+  final int? severity;
+  final bool handsOff;
+
+  const McBoardCard({
+    required this.key,
+    this.ref,
+    this.title,
+    this.url,
+    this.sourceKind,
+    this.sourceName,
+    this.project,
+    this.station,
+    this.stage,
+    this.since,
+    this.live = false,
+    this.badge = const McBadge(),
+    this.sessions = const [],
+    this.line,
+    this.type,
+    this.priority,
+    this.severity,
+    this.handsOff = false,
+  });
+
+  static McBoardCard? fromJson(dynamic json) {
+    final m = _map(json);
+    final key = _str(m['key']);
+    if (key == null) return null;
+    final src = _map(m['source']);
+    return McBoardCard(
+      key: key,
+      ref: _str(m['ref']),
+      title: _str(m['title']),
+      url: _str(m['url']),
+      sourceKind: _str(src['kind']),
+      sourceName: _str(src['name']),
+      project: _str(m['project']),
+      station: _str(m['station']),
+      stage: _str(m['stage']),
+      since: _at(m['since']),
+      live: _bool(m['live']),
+      badge: McBadge.fromJson(m['badge']),
+      sessions: _firstOf(_list(m['sessions'], McBoardSession.fromJson), (s) => s.id),
+      line: McLineRef.fromJson(m['line']),
+      type: _str(m['type']),
+      priority: _int(m['priority']),
+      severity: _int(m['severity']),
+      handsOff: _bool(m['handsOff']),
+    );
+  }
+
+  String get refLabel => ref ?? key;
+
+  /// The state the card shows: the ADO station, else the stage.
+  String? get stateLabel => station ?? (stage == null ? null : mcStageLabel(stage!));
+}
+
+/// One column of current work.
+class McBoardColumn {
+  final String id;
+  final int count;
+
+  /// How many more the server left out (it lists at most 100 a column).
+  final int more;
+  final List<McBoardCard> cards;
+  const McBoardColumn({required this.id, this.count = 0, this.more = 0, this.cards = const []});
+
+  static McBoardColumn? fromJson(dynamic json) {
+    final m = _map(json);
+    final id = _str(m['id']);
+    if (id == null) return null;
+    final cards = _firstOf(_list(m['cards'], McBoardCard.fromJson), (c) => c.key);
+    return McBoardColumn(id: id, count: _count(m['count']), more: _count(m['more']), cards: cards);
+  }
+
+  /// The column's heading.
+  String get title => mcBoardColumnTitle(id);
+}
+
+/// The heading of a column the server names (a newer column: its id, as sent).
+String mcBoardColumnTitle(String id) => switch (id) {
+      'in-progress' => 'In progress',
+      'pr-review' => 'PR / in review',
+      'committed-merged' => 'Committed / merged',
+      'ready-for-test' => 'Ready for test',
+      _ => id,
+    };
+
+/// One place candidates come from, and how its last read went.
+class McCandidateSource {
+  final String id;
+  final String kind;
+  final String name;
+  final String? project;
+
+  /// This server's own repo.
+  final bool own;
+
+  /// The bug hunter's queue: its dispatcher's own order.
+  final bool dispatcher;
+
+  /// `ok`, `stale` (the last read failed: the old list), `loading`, `error`, `not-wired`.
+  final String state;
+  final String? why;
+  final DateTime? fetchedAt;
+  final int total;
+  final bool more;
+
+  /// How many were left out because they already have a card or a live session.
+  final int hidden;
+  final List<McBoardCard> cards;
+  const McCandidateSource({
+    required this.id,
+    required this.kind,
+    required this.name,
+    this.project,
+    this.own = false,
+    this.dispatcher = false,
+    this.state = 'ok',
+    this.why,
+    this.fetchedAt,
+    this.total = 0,
+    this.more = false,
+    this.hidden = 0,
+    this.cards = const [],
+  });
+
+  static McCandidateSource? fromJson(dynamic json) {
+    final m = _map(json);
+    final src = _map(m['source']);
+    final id = _str(src['id']);
+    if (id == null) return null;
+    return McCandidateSource(
+      id: id,
+      kind: _str(src['kind']) ?? 'other',
+      name: _str(src['name']) ?? id,
+      project: _str(_map(src['project'])['name']),
+      own: _bool(src['own']),
+      dispatcher: _bool(src['dispatcher']),
+      state: _str(m['state']) ?? 'ok',
+      why: _str(m['why']),
+      fetchedAt: _at(m['fetchedAt']),
+      total: _count(m['total']),
+      more: _bool(m['more']),
+      hidden: _count(m['hidden']),
+      cards: _firstOf(_list(m['cards'], McBoardCard.fromJson), (c) => c.key),
+    );
+  }
+
+  /// "Bug hunter queue" for the bug hunter, else the repo or ADO project's name.
+  String get heading => kind == 'bug-hunter' ? 'Bug hunter queue' : name;
+}
+
+/// `GET /api/mc/board`.
+class McBoard {
+  final List<McBoardColumn> columns;
+  final List<McCandidateSource> candidates;
+
+  /// False when a server did not answer: a card that shows no session may have one there.
+  final bool complete;
+  final DateTime? generatedAt;
+  final DateTime? refreshedAt;
+  const McBoard({this.columns = const [], this.candidates = const [], this.complete = true, this.generatedAt, this.refreshedAt});
+
+  static McBoard fromJson(dynamic json) {
+    final m = _map(json);
+    return McBoard(
+      columns: _firstOf(_list(m['columns'], McBoardColumn.fromJson), (c) => c.id),
+      candidates: _firstOf(_list(m['candidates'], McCandidateSource.fromJson), (c) => c.id),
+      complete: m['complete'] != false,
+      generatedAt: _at(m['generatedAt']),
+      refreshedAt: _at(m['refreshedAt']),
+    );
+  }
+
+  /// Cards in the current-work columns.
+  int get workCount => columns.fold(0, (n, c) => n + c.count);
+
+  /// Candidates shown, over every source.
+  int get candidateCount => candidates.fold(0, (n, c) => n + c.cards.length);
+}

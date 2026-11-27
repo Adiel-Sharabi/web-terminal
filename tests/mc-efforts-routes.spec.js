@@ -87,7 +87,8 @@ test.describe('#561 GET /api/mc/efforts', () => {
 
   test('wiring (source gate): the verdicts are read from the ONE supervisor state both routes serve, behind mcRefusal', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    const route = src.slice(src.indexOf("app.get('/api/mc/efforts'"), src.indexOf("// --- API: #523 Mission Control: lines of work ---"));
+    // #567: the compute is ONE function (mcEffortsFor) the route and the work board share; the slice holds both.
+    const route = src.slice(src.indexOf('async function mcEffortsFor('), src.indexOf('// --- API: #567 Mission Control: the work board'));
     expect(route).toContain('mcRefusal(supervisorAuthority())');
     expect(route).toContain('supervisorStateNow(cfg)');
     // The supervisor page and MC share the one function: no second copy of the stateOf call.
@@ -97,7 +98,8 @@ test.describe('#561 GET /api/mc/efforts', () => {
 
   test('wiring (source gate): the cards are the ones Now shows - ONE mcBuildNow, never a second pendingCards', () => {
     const src = fs.readFileSync(path.join(__dirname, '..', 'server.js'), 'utf8');
-    const route = src.slice(src.indexOf("app.get('/api/mc/efforts'"), src.indexOf("// --- API: #523 Mission Control: lines of work ---"));
+    // #567: the compute is ONE function (mcEffortsFor) the route and the work board share; the slice holds both.
+    const route = src.slice(src.indexOf('async function mcEffortsFor('), src.indexOf('// --- API: #567 Mission Control: the work board'));
     expect(route).toContain('mcBuildNow(v)');
     expect(route).not.toContain('pendingCards');
     const now = src.slice(src.indexOf("app.get('/api/mc/now'"), src.indexOf("app.post('/api/mc/todo'"));

@@ -946,6 +946,15 @@ companion's daily foreground time from a phone over adb in `logs/phone-usage.jso
   finished), each with Start work; tap a line for its page. A machine that did not answer is said, and an
   effort whose lead may live there is marked, never called gone. A wait on you that no effort carries
   (the dispatcher's own, a closed tree) is shown above the efforts, never dropped. Server: `lib/mc-efforts.js`.
+- **The work board (#567, read-only):** a **Board** tab beside Now - five columns: **Candidates** (the next ~10 per source: this
+  server's GitHub repo, each configured project's repos and Azure DevOps project, and the bug hunter's own queue, read from its run
+  folder, or "not wired yet" with why), **In progress**, **PR / in review**, **Committed / merged**, **Ready for test**. A card shows its
+  source, project, title, how long it has been in its column and a wait badge - on you, valid wait, suspect or none - which is the
+  supervisor's verdict as the Running home shows it, never worked out again. Tap a card for its live session, or its page; a candidate
+  opens its tracker link. Candidates come from a cheap tracker query (no model), cached `mc.board.refreshMin` minutes (default 10)
+  and re-read on demand; an item with a card or a live session is never also a candidate. Read-only: no Queued column and no Start
+  yet. Server: `GET /api/mc/board` (capability `mc-board`; an older server says it has no board yet), `lib/mc-board.js`,
+  `lib/mc-candidates.js`.
 - Shapes and rules: [docs/mission-control.md](docs/mission-control.md).
 
 - **Fleet usage ledger (#529):** what every Claude session on every machine cost - tokens and weighted units
