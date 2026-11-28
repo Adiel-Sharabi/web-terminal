@@ -180,6 +180,27 @@ test.describe('classes, attribution and the scan rules', () => {
     expect(col.bhOf('bh-worker', { name: 'BH worker #77 retry' })).toEqual({ item: 77, role: 'worker' });
     expect(col.bhOf('child', {})).toBeNull();
   });
+  test('the 1A and 2A worker names ("BH1A worker #<id>", "BH2A worker #<id>") are bug-hunter workers of that item; names that only look alike are not', () => {
+    for (const [name, item] of [['BH1A worker #25704', 25704], ['BH2A worker #31', 31], ['bh1a WORKER #7 retry', 7], ['BH worker #5', 5]]) {
+      expect(col.classOf({ facts: facts(), wt: { name, parentId: 'p' } })).toBe('bh-worker');
+      expect(col.bhOf('bh-worker', { name })).toEqual({ item, role: 'worker' });
+    }
+    for (const name of ['BH3A worker #9', 'BH1A orchestrator', 'my BH1A worker #9', 'BH1A worker #']) {
+      expect(col.classOf({ facts: facts(), wt: { name, parentId: 'p' } })).toBe('child');
+    }
+    const keys = col.orchestratorKeys([{ name: 'BH1A worker #8', parentId: 'AAA', spawnedBy: 'bh1a lead' }]);
+    expect(keys.has('aaa') && keys.has('bh1a lead')).toBe(true);
+  });
+  test('needsReclass: a recorded session whose name reads as a worker but was recorded under another class is read again, once', () => {
+    const rec = (cls, hash = 'h') => ({ hash, cls });
+    expect(col.needsReclass({ prev: rec('child'), name: 'BH1A worker #25704' })).toBe(true);
+    expect(col.needsReclass({ prev: { hash: 'h' }, name: 'BH2A worker #3' })).toBe(true);      // recorded before the class was remembered
+    expect(col.needsReclass({ prev: rec('bh-worker'), name: 'BH1A worker #25704' })).toBe(false); // already right: not again
+    expect(col.needsReclass({ prev: rec('child'), name: 'some lead' })).toBe(false);
+    expect(col.needsReclass({ prev: rec('child', null), name: 'BH1A worker #1' })).toBe(false);   // an empty transcript has nothing to re-read
+    expect(col.needsReclass({ prev: undefined, name: 'BH1A worker #1' })).toBe(false);            // never recorded: the normal scan reads it
+    expect(col.needsReclass({ prev: rec('child'), name: undefined })).toBe(false);
+  });
   test('an orchestrator is the session that started bug-hunter workers, by id or by name', () => {
     const keys = col.orchestratorKeys([{ name: 'BH worker #1', parentId: 'AAA', spawnedBy: 'Lead One' }, { name: 'other', parentId: 'zzz' }]);
     expect(keys.has('aaa')).toBe(true);
