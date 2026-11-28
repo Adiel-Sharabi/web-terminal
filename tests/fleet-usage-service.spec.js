@@ -29,14 +29,15 @@ function rig(o = {}) {
   const claudeDir = 'claudeDir' in o ? o.claudeDir : path.join(dir, 'claude');
   if (claudeDir) fs.mkdirSync(claudeDir, { recursive: true });
   const timers = [];
+  const agents = createAgentSessionMap({ load: () => [], append: () => {}, now: () => clock });
   const svc = createUsageService({
     store, worker, claudeDir, statePath: path.join(dir, 'state.json'), now: () => clock,
-    agentSessions: createAgentSessionMap({ load: () => [], append: () => {}, now: () => clock }),
+    agentSessions: agents,
     getConfig: () => (o.configFn ? o.configFn() : o.config || null), defaultRoots: () => ['r'], readConfig: () => null, log: o.log,
     getPeers: () => o.peers || [], getJson: o.getJson || (async () => ({ status: 404, json: null })),
     setTimer: (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; }, clearTimer: (t) => { if (t) t.cleared = true; },
   });
-  return { svc, store, calls, timers, dir, claudeDir, advance: (ms) => { clock += ms; }, setSettings: (j) => fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(j)) };
+  return { svc, store, calls, timers, dir, claudeDir, agents, advance: (ms) => { clock += ms; }, setSettings: (j) => fs.writeFileSync(path.join(claudeDir, 'settings.json'), JSON.stringify(j)) };
 }
 const scanOf = (...sess) => () => ({ sessions: sess, left: 0, projectCache: {} });
 const sess = (sid, units, sig = 's1') => ({ sid, sig, summary: summary(units) });
@@ -55,6 +56,26 @@ test.describe('a collection pass', () => {
     expect(await r.svc.collectOnce()).toMatchObject({ scanned: 1, written: 1 });
     expect(r.store.records('session')[0].units).toBe(150);
     expect(r.store.heads().Alpha).toBe(3);
+  });
+
+  test('a session recorded before its name was known as a 1A worker is read again once, its class corrected, and then left alone', async () => {
+    // The worker's transcript never changes (sig s1): only the name the hooks learned does. The stub
+    // scan answers like the real one - it reads a session only when it is not in `known`.
+    const asked = [];
+    const r = rig({ script: { scan: (req) => { asked.push(Object.keys(req.known)); return { sessions: req.known.w ? [] : [sess('w', 100)], left: 0, projectCache: {} }; } } });
+    expect(await r.svc.collectOnce()).toMatchObject({ scanned: 1, written: 2 });            // first read: no name known, so it is interactive
+    expect(r.store.records('session')[0]).toMatchObject({ cls: 'interactive', bh: null });
+    r.advance(3 * 3600e3);
+    expect(await r.svc.collectOnce()).toMatchObject({ scanned: 0, written: 0 });            // nothing changed, nothing named: not read
+    r.agents.note('wt-w', 'w', { name: 'BH1A worker #25704', parentId: 'wt-lead', spawnedBy: 'lead', cwd: 'C:\\dev\\x', replaces: [] });
+    r.advance(60e3);
+    expect(await r.svc.collectOnce()).toMatchObject({ scanned: 1, written: 1 });            // named a worker now: read again
+    const rec = r.store.records('session').filter((x) => x.sid === 'w').sort((a, b) => b.seq - a.seq)[0];
+    expect(rec).toMatchObject({ cls: 'bh-worker', bh: { item: 25704, role: 'worker' }, name: 'BH1A worker #25704' });
+    r.advance(60e3);
+    expect(await r.svc.collectOnce()).toMatchObject({ scanned: 0, written: 0 });            // the class is remembered: not read a third time
+    expect(asked[2]).not.toContain('w');
+    expect(asked[3]).toContain('w');
   });
 
   test('the inventory is read once a day and written only when the project list changed', async () => {
