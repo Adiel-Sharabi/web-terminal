@@ -346,11 +346,14 @@ test.describe('#561 efforts: the cards are the ones Now shows (review of #576)',
     const out = efforts({ rows: [r] }).efforts[0];
     expect(out.needsYou).toEqual([]);
     expect(out.todoCount).toBe(1);
+    // #584: the card itself rides on the effort, so its page can show what to do.
+    expect(out.todo.map((c) => [c.id, c.kind])).toEqual([[cardIds([r])[0], 'action']]);
     expect(out.state).toBe('needs-you');
     // Later hides an action like any card: then the effort is not waiting on the person.
     const [id] = cardIds([r]);
     const later = efforts({ rows: [r], later: { [id]: { until: NOW + 60 * MIN } } }).efforts[0];
     expect(later.todoCount).toBe(0);
+    expect(later.todo).toEqual([]);
     expect(later.state).toBe('moving');
   });
 

@@ -1510,8 +1510,13 @@ class McEffort {
   /// is listed here but does not make the effort `needs-you`.
   final List<McCard> needsYou;
 
-  /// How many of the person's own to-dos (an action wait) this tree holds: they are on My to-do, not
-  /// under the effort, but they make it `needs-you`.
+  /// The person's own to-dos (an action wait) this tree holds, as the server sends them on My to-do
+  /// (#584: so the effort's page shows what to do). Empty from an older server, which sends only
+  /// [todoCount].
+  final List<McCard> todo;
+
+  /// How many of the person's own to-dos (an action wait) this tree holds: they are on My to-do, and
+  /// they make it `needs-you`.
   final int todoCount;
 
   /// A lead whose parent nobody listed while a server did not answer: [missing] names those.
@@ -1531,6 +1536,7 @@ class McEffort {
     this.sessions = const [],
     this.items = const [],
     this.needsYou = const [],
+    this.todo = const [],
     this.todoCount = 0,
     this.partial = false,
     this.missing = const [],
@@ -1553,6 +1559,7 @@ class McEffort {
       sessions: _firstOf(_list(m['sessions'], McEffortSession.fromJson), (s) => s.id),
       items: _firstOf(_list(m['items'], McEffortItem.fromJson), (i) => i.key),
       needsYou: _firstOf(_list(m['needsYou'], McCard.fromJson), (c) => c.id),
+      todo: _firstOf(_list(m['todo'], McCard.fromJson), (c) => c.id),
       todoCount: _count(m['todoCount']),
       partial: _bool(m['partial']),
       missing: _strings(m['missing']),
